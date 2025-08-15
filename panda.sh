@@ -483,6 +483,8 @@ trace_route_menu() {
                 clear
                 curl nxtrace.org/nt | bash
                 ;;
+ case 2)
+                clear
             2)
                 clear
                 read -p "Enter the IP address to trace: " ip_address
@@ -493,6 +495,9 @@ trace_route_menu() {
                 read -p "Enter the IP address to trace: " ip_address
                 nexttrace -T --psize 64 $ip_address -p 80
                 ;;
+                read -p "Press any key to continue..." key
+ case 3)
+ clear
             0)
                 break  # Exit the loop, return to the main menu
                 ;;
@@ -500,6 +505,7 @@ trace_route_menu() {
                 echo "Invalid input!"
                 ;;
         esac
+ read -p "Press any key to continue..." key
     done
 }
 # Function to test DNS response time and update resolv.conf with the best DNS group

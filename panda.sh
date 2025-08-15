@@ -1119,7 +1119,7 @@ update_script() {
     echo "Updating the script..."
 
     # Download the updated script
-    updated_script_url="https://raw.githubusercontent.com/pandaaxi/mine/main/panda.sh"
+    updated_script_url="https://raw.githubusercontent.com/pandaaxi/shellscript/main/panda.sh"
     if curl -fsSL -o panda.sh "$updated_script_url"; then
         chmod +x panda.sh
         echo "Script updated successfully."

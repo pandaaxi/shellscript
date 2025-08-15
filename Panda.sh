@@ -6,7 +6,7 @@ main_menu() {
     while true; do
         clear
         echo "▶ Main Menu"
-        echo "V0.2.8"
+        echo "V0.3.0"
         echo "------------------------"
         echo "1. System Information Query"
         echo "2. System Update"
@@ -15,16 +15,19 @@ main_menu() {
         echo "4. System Tools ▶"
  echo "5. Media Unblock Check ▶"
         echo "6. Docker Management ▶"
-        echo "7. WARP Management ▶"
-        echo "8. WGCF Management ▶"
-        echo "9. BBR Management ▶"
-        echo "10. Realm Management ▶"
+        echo "7. Trace Route ▶"
+        echo "8. WARP Management ▶"
+        echo "9. WGCF Management ▶"
+        echo "10. BBR Management ▶"
+ echo "11. Realm Management ▶"
         echo "------------------------"
         echo "00. Script Update"
+
         echo "99. Uninstall Panda"
         echo "0. Quit"
         echo "------------------------"
         read -p "Enter your choice: " choice
+
 
         case $choice in
             1)
@@ -46,15 +49,18 @@ main_menu() {
                 docker_management
                 ;;
             7)
+ trace_route_menu
+ ;;
+            8)
                 warp_management
                 ;;
-            8)
+            9)
                 install_fail2ban
                 ;;
-            9)
+            10)
                 bbr_management
                 ;;
-            10)
+            11)
                 realm_management
                 ;;
             00)
@@ -455,6 +461,45 @@ media_unblock_check() {
             *) echo "Invalid input!" ;;
         esac
         read -p "Press any key to continue..." key
+    done
+}
+
+# Sub menu for Trace Route
+trace_route_menu() {
+    while true; do
+        clear
+        echo "▶ Trace Route"
+        echo "------------------------"
+        echo "1. Install"
+        echo "2. Trace Lsize"
+        echo "3. Trace Ssize"
+        echo "------------------------"
+        echo "0. Return to Main Menu"
+        echo "------------------------"
+        read -p "Enter your choice: " sub_choice
+
+        case $sub_choice in
+            1)
+                clear
+                curl nxtrace.org/nt | bash
+                ;;
+            2)
+                clear
+                read -p "Enter the IP address to trace: " ip_address
+                nexttrace -T --psize 1450 $ip_address -p 80
+                ;;
+            3)
+                clear
+                read -p "Enter the IP address to trace: " ip_address
+                nexttrace -T --psize 64 $ip_address -p 80
+                ;;
+            0)
+                break  # Exit the loop, return to the main menu
+                ;;
+            *)
+                echo "Invalid input!"
+                ;;
+        esac
     done
 }
 # Function to test DNS response time and update resolv.conf with the best DNS group

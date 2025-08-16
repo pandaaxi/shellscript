@@ -494,6 +494,7 @@ trace_route_menu() {
                 read -p "Enter the IP address to trace: " ip_address
                 nexttrace -T --psize 64 $ip_address -p 80
                 read -p "Press any key to continue..." key
+                ;;
             0)
                 break  # Exit the loop, return to the main menu
                 ;;

@@ -55,7 +55,7 @@ main_menu() {
                 warp_management
                 ;;
             9)
-                install_fail2ban
+                wgcf
                 ;;
             10)
                 bbr_management
@@ -367,6 +367,8 @@ while true; do
     echo "4. Swap Memory Management"
     echo "5. Reboot Server"
     echo "------------------------"
+    echo "6. Install Fail2Ban"
+    echo "------------------------"
     echo "0. Return to Main Menu"
     echo "------------------------"
     read -p "Enter your choice: " sub_choice
@@ -425,6 +427,9 @@ while true; do
             ;;
         5)
             reboot_server
+            ;;
+        6)
+            install_fail2ban
             ;;
         0)
             break  # Exit the loop, return to the main menu
@@ -513,7 +518,7 @@ set_dns() {
         echo "dig command is not available. Installing dnsutils..."
         apt update && apt install -y dnsutils
     fi
-
+install_fail2ban 
     # DNS servers to test
     local ipv4_dns_servers=("1.1.1.1" "1.0.0.1" "8.8.8.8" "8.8.4.4")
     local ipv6_dns_servers=("2606:4700:4700::1111" "2606:4700:4700::1001" "2001:4860:4860::8888" "2001:4860:4860::8844")

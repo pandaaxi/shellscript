@@ -363,10 +363,12 @@ while true; do
     echo "1. Set DNS Address"
     echo "2. Set SSH Port"
     echo "3. Manage SSH Key Authentication"
-    echo "4. Install Fail2Ban"
+    echo "------------------------"
+    echo "4. Install Fail2ban"
+    echo "5. Fail2ban Status"
     echo "------------------------"
     echo "5. Swap Memory Management"
-    echo "6. Reboot Server"
+    echo "7. Reboot Server"
     echo "------------------------"
     echo "0. Return to Main Menu"
     echo "------------------------"
@@ -386,6 +388,9 @@ while true; do
             ;;
         4)
             install_fail2ban
+            ;;
+        5)
+            fail2ban_status
             ;;
         5)
             while true; do
@@ -882,27 +887,133 @@ reboot_server() {
 
 # Function to install Fail2Ban
 install_fail2ban() {
- echo "Installing Fail2Ban..."
+  set -e
 
-    # Automatically detect SSH port from sshd_config
-    ssh_port=$(grep -P '^\s*Port\s+\d+' /etc/ssh/sshd_config | awk '{print $2}')
-    if [ -z "$ssh_port" ]; then
-        ssh_port=22 # Default SSH port
+  echo "Detecting SSH port(s)..."
+
+  detect_ssh_ports() {
+    local ports=""
+
+    # 1) Best: effective config from sshd
+    if command -v sshd >/dev/null 2>&1; then
+      # Some distros require -C for sshd -T to work without a TTY
+      ports=$(sshd -T 2>/dev/null | awk '/^port /{print $2}' | paste -sd, -) || true
+      if [ -z "$ports" ]; then
+        ports=$(sshd -T -C user=root,host="$(hostname)",addr=127.0.0.1 2>/dev/null \
+                | awk '/^port /{print $2}' | paste -sd, -) || true
+      fi
     fi
 
-    echo "Using SSH port $ssh_port for Fail2Ban configuration."
-
-    if [ -f "/etc/debian_version" ]; then
-        apt update && apt install -y fail2ban
-        systemctl enable fail2ban
-        systemctl start fail2ban
-    elif [ -f "/etc/alpine-release" ]; then
-        # Alpine Linux
-        apk update
-        apk add fail2ban
+    # 2) Fallback: parse sshd_config for Port lines (first non-comment)
+    if [ -z "$ports" ] && [ -r /etc/ssh/sshd_config ]; then
+      ports=$(awk '
+        $1 ~ /^Port$/ && $2 ~ /^[0-9]+$/ { print $2 }
+      ' /etc/ssh/sshd_config | paste -sd, -)
     fi
-    echo "Fail2Ban installation completed."
+
+    # 3) Last resort: check listening sockets for sshd
+    if [ -z "$ports" ]; then
+      if command -v ss >/dev/null 2>&1; then
+        ports=$(ss -tuln | awk '/:([0-9]+)\s/ && /ssh/ { match($0, /:([0-9]+)/, a); if (a[1]!="") print a[1] }' \
+                | sort -u | paste -sd, -)
+      elif command -v netstat >/dev/null 2>&1; then
+        ports=$(netstat -tuln | awk '/:([0-9]+)\s/ && /ssh/ { match($0, /:([0-9]+)/, a); if (a[1]!="") print a[1] }' \
+                | sort -u | paste -sd, -)
+      fi
+    fi
+
+    # Default to 22 if still unknown
+    if [ -z "$ports" ]; then ports="22"; fi
+
+    echo "$ports"
+  }
+
+  ssh_ports="$(detect_ssh_ports)"
+  echo "Using SSH port(s): $ssh_ports"
+
+  echo "Installing Fail2Ban..."
+  if [ -f "/etc/debian_version" ]; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt update -y
+    apt install -y fail2ban
+    systemctl enable fail2ban
+  elif [ -f "/etc/alpine-release" ]; then
+    apk update
+    apk add fail2ban
+    rc-update add fail2ban default
+  else
+    echo "Warning: Unsupported distro auto-install. Please install fail2ban manually."
+  fi
+
+  # Choose a reasonable auth log path
+  auth_log=""
+  for f in /var/log/auth.log /var/log/secure /var/log/messages; do
+    [ -f "$f" ] && auth_log="$f" && break
+  done
+  [ -z "$auth_log" ] && auth_log="/var/log/auth.log"  # default guess
+
+  # Write jail.local to ensure sshd jail matches detected port(s)
+  mkdir -p /etc/fail2ban
+  cat >/etc/fail2ban/jail.local <<EOF
+[DEFAULT]
+# You can tune bantime/findtime/maxretry here if needed
+
+[sshd]
+enabled = true
+port    = ${ssh_ports}
+filter  = sshd
+logpath = ${auth_log}
+backend = auto
+maxretry = 5
+EOF
+
+  # Start / restart service
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl restart fail2ban || systemctl start fail2ban
+    systemctl status --no-pager fail2ban || true
+  else
+    rc-service fail2ban restart || rc-service fail2ban start
+    rc-service fail2ban status || true
+  fi
+
+  echo "Fail2Ban installation & SSH jail configured for port(s): ${ssh_ports}"
+  echo "Verify with: sudo fail2ban-client status sshd"
 }
+
+fail2ban_status() {
+  echo "=== Fail2Ban Status Report ==="
+
+  # --- Detect SSH port(s) ---
+  ssh_ports=$(awk '/^\s*Port\s+[0-9]+/ {print $2}' /etc/ssh/sshd_config | paste -sd, -)
+  [ -z "$ssh_ports" ] && ssh_ports="22"
+  echo "SSH Port(s): $ssh_ports"
+
+  # --- Detect Fail2Ban sshd jail port(s) ---
+  fb_ports=$(grep -i "^[[:space:]]*port[[:space:]]*=" /etc/fail2ban/jail.local /etc/fail2ban/jail.d/*.conf 2>/dev/null \
+             | grep -m1 sshd | awk -F= '{print $2}' | xargs)
+  [ -z "$fb_ports" ] && fb_ports="(default 22 or ssh)"
+  echo "Fail2Ban Port(s): $fb_ports"
+
+  # --- Fail2Ban service status ---
+  if systemctl is-active --quiet fail2ban 2>/dev/null; then
+    fb_status="active (running)"
+  else
+    fb_status="inactive (stopped)"
+  fi
+  echo "Fail2Ban Service: $fb_status"
+
+  # --- Jail status (sshd) ---
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    echo
+    echo "--- Jail: sshd ---"
+    sudo fail2ban-client status sshd 2>/dev/null | grep -E "Currently failed|Total failed|Currently banned|Total banned|Banned IP list"
+  else
+    echo "Fail2Ban client not found!"
+  fi
+
+  echo "=============================="
+}
+
 
 # Docker Sub Menu
 docker_management() {

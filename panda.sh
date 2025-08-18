@@ -6,7 +6,7 @@ main_menu() {
     while true; do
         clear
         echo "▶ Main Menu"
-        echo "V0.3.2"
+        echo "V0.3.3"
         echo "------------------------"
         echo "1. System Information Query"
         echo "2. System Update"

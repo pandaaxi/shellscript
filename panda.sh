@@ -6,7 +6,7 @@ main_menu() {
     while true; do
         clear
         echo "▶ Main Menu"
-        echo "V0.3.1"
+        echo "V0.3.2"
         echo "------------------------"
         echo "1. System Information Query"
         echo "2. System Update"
@@ -510,43 +510,72 @@ trace_route_menu() {
 }
 # Function to test DNS response time and update resolv.conf with the best DNS group
 set_dns() {
-    local domain="google.com"
+    #-----------------------------
+    # Config
+    #-----------------------------
+    local domain="google.com"   # test target for dig
+    local PING_TIMEOUT=1        # seconds
+    local BIG=999999            # large sentinel value
 
-    # Ensure dig exists (Debian/Ubuntu). Remove or adjust for other distros.
-    if ! command -v dig >/dev/null 2>&1; then
-        echo "dig not found. Attempting to install dnsutils..."
-        if command -v apt >/dev/null 2>&1; then
-            apt update && apt install -y dnsutils
-        else
-            echo "No apt found; please install 'dig' (bind-utils/dnsutils) for your distro."
-            return 1
-        fi
-    fi
-
-    # ---------- DNS candidates ----------
+    # IPv4
     local cf_ipv4_primary="1.1.1.1"
     local cf_ipv4_secondary="1.0.0.1"
     local gg_ipv4_primary="8.8.8.8"
     local gg_ipv4_secondary="8.8.4.4"
 
+    # IPv6
     local cf_ipv6_primary="2606:4700:4700::1111"
     local cf_ipv6_secondary="2606:4700:4700::1001"
     local gg_ipv6_primary="2001:4860:4860::8888"
     local gg_ipv6_secondary="2001:4860:4860::8844"
 
-    # ---------- helpers ----------
-    test_dns() {
-        local dns_server="$1"
-        # Use +stats to capture "Query time: N msec". Return large number on failure.
-        local rt
-        rt="$(dig @"$dns_server" "$domain" +stats 2>/dev/null | awk '/Query time:/{print $4; exit}')"
-        if [ -z "$rt" ]; then
-            echo 99999
+    #-----------------------------
+    # Root check for resolv.conf
+    #-----------------------------
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "This script must run as root to update /etc/resolv.conf."
+        return 1
+    fi
+
+    #-----------------------------
+    # Ensure dig is installed
+    #-----------------------------
+    ensure_dig() {
+        if command -v dig >/dev/null 2>&1; then
+            return 0
+        fi
+        echo "dig not found; attempting to install..."
+
+        # Best-effort detection of package manager
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -y && apt-get install -y dnsutils
+        elif command -v apt >/dev/null 2>&1; then
+            apt update -y && apt install -y dnsutils
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y bind-utils
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y bind-utils
+        elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache bind-tools
+        elif command -v pacman >/dev/null 2>&1; then
+            pacman -Sy --noconfirm bind
+        elif command -v zypper >/dev/null 2>&1; then
+            zypper --non-interactive install bind-utils
         else
-            echo "$rt"
+            echo "Could not detect supported package manager. Please install 'dig' manually (dnsutils/bind-utils/bind-tools)."
+            return 1
+        fi
+
+        if ! command -v dig >/dev/null 2>&1; then
+            echo "Installation reported success but 'dig' still not found. Aborting."
+            return 1
         fi
     }
+    ensure_dig || return 1
 
+    #-----------------------------
+    # Helpers: company, IPv6 check
+    #-----------------------------
     get_company() {
         case "$1" in
             "$cf_ipv4_primary"|"$cf_ipv4_secondary"|"$cf_ipv6_primary"|"$cf_ipv6_secondary") echo "Cloudflare" ;;
@@ -555,44 +584,124 @@ set_dns() {
         esac
     }
 
-    # ---------- IPv4 ----------
-    echo "Testing IPv4 DNS servers..."
-    local time_cf_ipv4_primary time_gg_ipv4_primary primary_winner_ipv4 primary_company_ipv4
-    time_cf_ipv4_primary=$(test_dns "$cf_ipv4_primary");  echo "IPv4 Primary Cloudflare ($cf_ipv4_primary): ${time_cf_ipv4_primary} ms"
-    time_gg_ipv4_primary=$(test_dns "$gg_ipv4_primary");  echo "IPv4 Primary Google    ($gg_ipv4_primary): ${time_gg_ipv4_primary} ms"
+    is_ipv6() { case "$1" in *:*) return 0 ;; *) return 1 ;; esac; }
 
-    if [ "$time_cf_ipv4_primary" -lt "$time_gg_ipv4_primary" ]; then
-        primary_winner_ipv4="$cf_ipv4_primary"; primary_company_ipv4="Cloudflare"
-    else
-        primary_winner_ipv4="$gg_ipv4_primary"; primary_company_ipv4="Google"
-    fi
+    #-----------------------------
+    # Helpers: measure ping & dig
+    #-----------------------------
+    ping_ms() {
+        # Returns integer ms or BIG on failure
+        local host="$1"
+        local out
+        if is_ipv6 "$host"; then
+            # Use ping -6 if available, otherwise ping6
+            if ping -6 -c 1 -W "$PING_TIMEOUT" -n "$host" >/dev/null 2>&1; then
+                out=$(ping -6 -c 1 -W "$PING_TIMEOUT" -n "$host" 2>/dev/null)
+            elif command -v ping6 >/dev/null 2>&1; then
+                out=$(ping6 -c 1 -W "$PING_TIMEOUT" -n "$host" 2>/dev/null)
+            else
+                echo "$BIG"; return
+            fi
+        else
+            out=$(ping -c 1 -W "$PING_TIMEOUT" -n "$host" 2>/dev/null) || { echo "$BIG"; return; }
+        fi
+        # Extract time=XX.xxx ms
+        # Handle locales by grepping "time=" and stripping " ms"
+        local t
+        t=$(printf "%s\n" "$out" | sed -n 's/.*time=\([0-9.]\+\).*/\1/p' | head -n1)
+        if [ -z "$t" ]; then echo "$BIG"; else
+            # round to integer ms
+            awk -v x="$t" 'BEGIN{printf("%d\n", (x<0)?0:int(x+0.5))}'
+        fi
+    }
+
+    dig_ms() {
+        # Returns integer ms (Query time) or BIG on failure
+        local server="$1" tgt="$2"
+        local out
+        out=$(dig @"$server" "$tgt" +stats +time=2 +tries=1 2>/dev/null)
+        local t
+        t=$(printf "%s\n" "$out" | awk '/Query time:/{print $4; exit}')
+        if [ -z "$t" ]; then echo "$BIG"; else echo "$t"; fi
+    }
+
+    measure_server() {
+        # Emits: "<server> ping=<ms> dig=<ms> combined=<ms>"
+        local s="$1"
+        local p d c
+        p=$(ping_ms "$s")
+        d=$(dig_ms  "$s" "$domain")
+        # Combined score: prefer real DNS performance (dig) but include network RTT.
+        # Weight dig more heavily (e.g., 70% dig, 30% ping).
+        # If any metric is BIG (failed), it dominates.
+        if [ "$p" -ge "$BIG" ] || [ "$d" -ge "$BIG" ]; then
+            c="$BIG"
+        else
+            # c = 0.7*dig + 0.3*ping, rounded
+            c=$(awk -v dd="$d" -v pp="$p" 'BEGIN{printf("%d\n", int((0.7*dd + 0.3*pp)+0.5))}')
+        fi
+        echo "$s ping=$p dig=$d combined=$c"
+    }
+
+    better_of_two() {
+        # Usage: better_of_two <A> <B>
+        # Prints: "<winner_server> <winner_company> <winner_combined>"
+        local A="$1" B="$2"
+        local ra rb ca cb pa pb da db
+        ra=$(measure_server "$A")
+        rb=$(measure_server "$B")
+
+        ca=$(printf "%s\n" "$ra" | sed -n 's/.*combined=\([0-9]\+\).*/\1/p')
+        cb=$(printf "%s\n" "$rb" | sed -n 's/.*combined=\([0-9]\+\).*/\1/p')
+        pa=$(printf "%s\n" "$ra" | sed -n 's/.*ping=\([0-9]\+\).*/\1/p')
+        pb=$(printf "%s\n" "$rb" | sed -n 's/.*ping=\([0-9]\+\).*/\1/p')
+        da=$(printf "%s\n" "$ra" | sed -n 's/.*dig=\([0-9]\+\).*/\1/p')
+        db=$(printf "%s\n" "$rb" | sed -n 's/.*dig=\([0-9]\+\).*/\1/p')
+
+        echo "  $ra"
+        echo "  $rb"
+
+        local win=; local wscore=
+        if [ "$ca" -lt "$cb" ]; then
+            win="$A"; wscore="$ca"
+        elif [ "$cb" -lt "$ca" ]; then
+            win="$B"; wscore="$cb"
+        else
+            # Tie on combined — break by lower dig, then lower ping
+            if [ "$da" -lt "$db" ]; then
+                win="$A"; wscore="$ca"
+            elif [ "$db" -lt "$da" ]; then
+                win="$B"; wscore="$cb"
+            else
+                if [ "$pa" -lt "$pb" ]; then
+                    win="$A"; wscore="$ca"
+                else
+                    win="$B"; wscore="$cb"
+                fi
+            fi
+        fi
+
+        local comp; comp=$(get_company "$win")
+        echo "$win $comp $wscore"
+    }
+
+    #-----------------------------
+    # IPv4 logic (with retest)
+    #-----------------------------
+    echo "=== IPv4 tests ==="
+    local primary_winner_ipv4 primary_company_ipv4
+    read -r primary_winner_ipv4 primary_company_ipv4 _ < <(better_of_two "$cf_ipv4_primary" "$gg_ipv4_primary")
     echo "Primary IPv4 winner: $primary_winner_ipv4 ($primary_company_ipv4)"
 
-    # Round 1 secondary
-    local time_cf_ipv4_secondary_r1 time_gg_ipv4_secondary_r1 secondary_winner_r1_ipv4 secondary_company_r1_ipv4
-    time_cf_ipv4_secondary_r1=$(test_dns "$cf_ipv4_secondary"); echo "IPv4 Secondary Cloudflare ($cf_ipv4_secondary): ${time_cf_ipv4_secondary_r1} ms"
-    time_gg_ipv4_secondary_r1=$(test_dns "$gg_ipv4_secondary"); echo "IPv4 Secondary Google    ($gg_ipv4_secondary): ${time_gg_ipv4_secondary_r1} ms"
-
-    if [ "$time_cf_ipv4_secondary_r1" -lt "$time_gg_ipv4_secondary_r1" ]; then
-        secondary_winner_r1_ipv4="$cf_ipv4_secondary"; secondary_company_r1_ipv4="Cloudflare"
-    else
-        secondary_winner_r1_ipv4="$gg_ipv4_secondary"; secondary_company_r1_ipv4="Google"
-    fi
+    local secondary_winner_r1_ipv4 secondary_company_r1_ipv4
+    read -r secondary_winner_r1_ipv4 secondary_company_r1_ipv4 _ < <(better_of_two "$cf_ipv4_secondary" "$gg_ipv4_secondary")
     echo "Secondary IPv4 Round 1 winner: $secondary_winner_r1_ipv4 ($secondary_company_r1_ipv4)"
 
-    # Decide/retest for IPv4
     local final_ipv4_dns=()
     if [ "$secondary_company_r1_ipv4" != "$primary_company_ipv4" ]; then
-        echo "Secondary IPv4 Round 1 differs from primary company; retesting secondary servers..."
-        local time_cf_ipv4_secondary_r2 time_gg_ipv4_secondary_r2 secondary_winner_r2_ipv4 secondary_company_r2_ipv4
-        time_cf_ipv4_secondary_r2=$(test_dns "$cf_ipv4_secondary"); echo "IPv4 Secondary Cloudflare retest ($cf_ipv4_secondary): ${time_cf_ipv4_secondary_r2} ms"
-        time_gg_ipv4_secondary_r2=$(test_dns "$gg_ipv4_secondary"); echo "IPv4 Secondary Google    retest ($gg_ipv4_secondary): ${time_gg_ipv4_secondary_r2} ms"
-
-        if [ "$time_cf_ipv4_secondary_r2" -lt "$time_gg_ipv4_secondary_r2" ]; then
-            secondary_winner_r2_ipv4="$cf_ipv4_secondary"; secondary_company_r2_ipv4="Cloudflare"
-        else
-            secondary_winner_r2_ipv4="$gg_ipv4_secondary"; secondary_company_r2_ipv4="Google"
-        fi
+        echo "Secondary IPv4 R1 company differs from primary; retesting secondaries ..."
+        local secondary_winner_r2_ipv4 secondary_company_r2_ipv4
+        read -r secondary_winner_r2_ipv4 secondary_company_r2_ipv4 _ < <(better_of_two "$cf_ipv4_secondary" "$gg_ipv4_secondary")
         echo "Secondary IPv4 Round 2 winner: $secondary_winner_r2_ipv4 ($secondary_company_r2_ipv4)"
 
         if [ "$secondary_company_r2_ipv4" = "$primary_company_ipv4" ]; then
@@ -609,45 +718,24 @@ set_dns() {
         final_ipv4_dns+=("$primary_winner_ipv4" "$secondary_winner_r1_ipv4")
     fi
 
-    # ---------- IPv6 ----------
+    #-----------------------------
+    # IPv6 logic (with retest)
+    #-----------------------------
     echo
-    echo "Testing IPv6 DNS servers..."
-    local time_cf_ipv6_primary time_gg_ipv6_primary primary_winner_ipv6 primary_company_ipv6
-    time_cf_ipv6_primary=$(test_dns "$cf_ipv6_primary");  echo "IPv6 Primary Cloudflare ($cf_ipv6_primary): ${time_cf_ipv6_primary} ms"
-    time_gg_ipv6_primary=$(test_dns "$gg_ipv6_primary");  echo "IPv6 Primary Google    ($gg_ipv6_primary): ${time_gg_ipv6_primary} ms"
-
-    if [ "$time_cf_ipv6_primary" -lt "$time_gg_ipv6_primary" ]; then
-        primary_winner_ipv6="$cf_ipv6_primary"; primary_company_ipv6="Cloudflare"
-    else
-        primary_winner_ipv6="$gg_ipv6_primary"; primary_company_ipv6="Google"
-    fi
+    echo "=== IPv6 tests ==="
+    local primary_winner_ipv6 primary_company_ipv6
+    read -r primary_winner_ipv6 primary_company_ipv6 _ < <(better_of_two "$cf_ipv6_primary" "$gg_ipv6_primary")
     echo "Primary IPv6 winner: $primary_winner_ipv6 ($primary_company_ipv6)"
 
-    # Round 1 secondary
-    local time_cf_ipv6_secondary_r1 time_gg_ipv6_secondary_r1 secondary_winner_r1_ipv6 secondary_company_r1_ipv6
-    time_cf_ipv6_secondary_r1=$(test_dns "$cf_ipv6_secondary"); echo "IPv6 Secondary Cloudflare ($cf_ipv6_secondary): ${time_cf_ipv6_secondary_r1} ms"
-    time_gg_ipv6_secondary_r1=$(test_dns "$gg_ipv6_secondary"); echo "IPv6 Secondary Google    ($gg_ipv6_secondary): ${time_gg_ipv6_secondary_r1} ms"
-
-    if [ "$time_cf_ipv6_secondary_r1" -lt "$time_gg_ipv6_secondary_r1" ]; then
-        secondary_winner_r1_ipv6="$cf_ipv6_secondary"; secondary_company_r1_ipv6="Cloudflare"
-    else
-        secondary_winner_r1_ipv6="$gg_ipv6_secondary"; secondary_company_r1_ipv6="Google"
-    fi
+    local secondary_winner_r1_ipv6 secondary_company_r1_ipv6
+    read -r secondary_winner_r1_ipv6 secondary_company_r1_ipv6 _ < <(better_of_two "$cf_ipv6_secondary" "$gg_ipv6_secondary")
     echo "Secondary IPv6 Round 1 winner: $secondary_winner_r1_ipv6 ($secondary_company_r1_ipv6)"
 
-    # Decide/retest for IPv6
     local final_ipv6_dns=()
     if [ "$secondary_company_r1_ipv6" != "$primary_company_ipv6" ]; then
-        echo "Secondary IPv6 Round 1 differs from primary company; retesting secondary servers..."
-        local time_cf_ipv6_secondary_r2 time_gg_ipv6_secondary_r2 secondary_winner_r2_ipv6 secondary_company_r2_ipv6
-        time_cf_ipv6_secondary_r2=$(test_dns "$cf_ipv6_secondary"); echo "IPv6 Secondary Cloudflare retest ($cf_ipv6_secondary): ${time_cf_ipv6_secondary_r2} ms"
-        time_gg_ipv6_secondary_r2=$(test_dns "$gg_ipv6_secondary"); echo "IPv6 Secondary Google    retest ($gg_ipv6_secondary): ${time_gg_ipv6_secondary_r2} ms"
-
-        if [ "$time_cf_ipv6_secondary_r2" -lt "$time_gg_ipv6_secondary_r2" ]; then
-            secondary_winner_r2_ipv6="$cf_ipv6_secondary"; secondary_company_r2_ipv6="Cloudflare"
-        else
-            secondary_winner_r2_ipv6="$gg_ipv6_secondary"; secondary_company_r2_ipv6="Google"
-        fi
+        echo "Secondary IPv6 R1 company differs from primary; retesting secondaries ..."
+        local secondary_winner_r2_ipv6 secondary_company_r2_ipv6
+        read -r secondary_winner_r2_ipv6 secondary_company_r2_ipv6 _ < <(better_of_two "$cf_ipv6_secondary" "$gg_ipv6_secondary")
         echo "Secondary IPv6 Round 2 winner: $secondary_winner_r2_ipv6 ($secondary_company_r2_ipv6)"
 
         if [ "$secondary_company_r2_ipv6" = "$primary_company_ipv6" ]; then
@@ -664,28 +752,27 @@ set_dns() {
         final_ipv6_dns+=("$primary_winner_ipv6" "$secondary_winner_r1_ipv6")
     fi
 
-    # ---------- Apply ----------
+    #-----------------------------
+    # Apply to resolv.conf
+    #-----------------------------
     echo
-    echo "Final IPv4 DNS servers: ${final_ipv4_dns[*]}"
-    echo "Final IPv6 DNS servers: ${final_ipv6_dns[*]}"
+    echo "Final IPv4 DNS: ${final_ipv4_dns[*]}"
+    echo "Final IPv6 DNS: ${final_ipv6_dns[*]}"
 
     if [ "${#final_ipv4_dns[@]}" -eq 0 ] && [ "${#final_ipv6_dns[@]}" -eq 0 ]; then
-        echo "No DNS servers selected. Aborting."
+        echo "No DNS servers selected; aborting."
         return 1
     fi
 
     echo "Updating /etc/resolv.conf ..."
     {
-        for dns in "${final_ipv4_dns[@]}"; do
-            echo "nameserver $dns"
-        done
-        for dns in "${final_ipv6_dns[@]}"; do
-            echo "nameserver $dns"
-        done
+        for s in "${final_ipv4_dns[@]}"; do echo "nameserver $s"; done
+        for s in "${final_ipv6_dns[@]}"; do echo "nameserver $s"; done
     } > /etc/resolv.conf
 
-    echo "DNS settings updated successfully."
+    echo "DNS settings updated."
 }
+
 
 
 set_ssh_port() {

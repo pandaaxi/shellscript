@@ -6,7 +6,7 @@ main_menu() {
     while true; do
         clear
         echo "▶ Main Menu"
-        echo "V0.3.3"
+        echo "V0.3.5"
         echo "------------------------"
         echo "1. System Information Query"
         echo "2. System Update"
@@ -981,38 +981,187 @@ EOF
 }
 
 fail2ban_status() {
+  set -u
+
   echo "=== Fail2Ban Status Report ==="
 
-  # --- Detect SSH port(s) ---
-  ssh_ports=$(awk '/^\s*Port\s+[0-9]+/ {print $2}' /etc/ssh/sshd_config | paste -sd, -)
-  [ -z "$ssh_ports" ] && ssh_ports="22"
+  # ---------- helpers ----------
+  _resolve_tokens_to_ports() {
+    # Convert tokens like "ssh, 19025" -> "22,19025" (if resolvable in /etc/services)
+    local out=""
+    local t resolved
+    for t in $(echo "$1" | tr ',;' '  '); do
+      t=$(echo "$t" | xargs)
+      [ -z "$t" ] && continue
+      if [[ "$t" =~ ^[0-9]+$ ]] || [[ "$t" =~ ^[0-9]+:[0-9]+$ ]] || [[ "$t" == "*" ]] || [[ "$t" == "all" ]]; then
+        resolved="$t"
+      else
+        resolved=$(getent services "$t" 2>/dev/null | awk '{print $2}' | cut -d/ -f1 | head -n1)
+        [ -z "$resolved" ] && resolved="$t"
+      fi
+      out="${out}${resolved},"
+    done
+    echo "${out%,}"
+  }
+
+  _detect_ssh_ports() {
+    local ports=""
+    if command -v sshd >/dev/null 2>&1; then
+      ports=$(sshd -T -C user=root,host="$(hostname)",addr=127.0.0.1 2>/dev/null \
+              | awk '/^port /{print $2}' | sort -u | paste -sd, -)
+    fi
+    if [ -z "${ports:-}" ] && [ -r /etc/ssh/sshd_config ]; then
+      ports=$(awk '/^\s*Port\s+[0-9]+/ {print $2}' /etc/ssh/sshd_config | sort -u | paste -sd, -)
+    fi
+    if [ -z "${ports:-}" ]; then
+      if command -v ss >/dev/null 2>&1; then
+        ports=$(ss -tuln | awk '/sshd/ { if (match($0, /:([0-9]+)/, a)) print a[1] }' | sort -u | paste -sd, -)
+      elif command -v netstat >/dev/null 2>&1; then
+        ports=$(netstat -tulnp 2>/dev/null | awk '/sshd/ { if (match($0, /:([0-9]+)/, a)) print a[1] }' | sort -u | paste -sd, -)
+      fi
+    fi
+    [ -z "${ports:-}" ] && ports="22"
+    echo "$ports"
+  }
+
+  _extract_port_from_file() {
+    # Args: <file> <section>
+    # Returns the LAST 'port =' seen in that section of the file (ignores comments/whitespace)
+    local file="$1" section="$2"
+    awk -v want="[$section]" '
+      function ltrim(s){sub(/^[ \t]+/,"",s);return s}
+      function rmcmt(s){sub(/[ \t]*#.*$/,"",s);sub(/[ \t]*;.*$/,"",s);return s}
+      BEGIN{ins=0;last=""}
+      {
+        line=$0
+        gsub(/\r$/,"",line)
+        line=rmcmt(line)
+        line=ltrim(line)
+        if(line=="") next
+        if(line ~ /^\[/){
+          ins = (tolower(line) == tolower(want))
+          next
+        }
+        if(ins && line ~ /^port[ \t]*=/){
+          sub(/^port[ \t]*=[ \t]*/,"",line)
+          last=line
+        }
+      }
+      END{ if(last!="") print last }
+    ' "$file" 2>/dev/null
+  }
+
+  _get_f2b_ports_for_jail() {
+    # Effective precedence: jail.conf -> jail.d/*.conf (sorted) -> jail.local (last wins)
+    local jail="$1"
+    local default_port="" jail_port="" v f
+
+    # 1) jail.conf
+    f="/etc/fail2ban/jail.conf"
+    [ -f "$f" ] && {
+      v="$(_extract_port_from_file "$f" "DEFAULT")";   [ -n "$v" ] && default_port="$v"
+      v="$(_extract_port_from_file "$f" "$jail")";     [ -n "$v" ] && jail_port="$v"
+    }
+
+    # 2) jail.d/*.conf (sorted)
+    if [ -d /etc/fail2ban/jail.d ]; then
+      for f in $(ls -1 /etc/fail2ban/jail.d/*.conf 2>/dev/null | sort); do
+        v="$(_extract_port_from_file "$f" "DEFAULT")"; [ -n "$v" ] && default_port="$v"
+        v="$(_extract_port_from_file "$f" "$jail")";   [ -n "$v" ] && jail_port="$v"
+      done
+    fi
+
+    # 3) jail.local (highest precedence)
+    f="/etc/fail2ban/jail.local"
+    [ -f "$f" ] && {
+      v="$(_extract_port_from_file "$f" "DEFAULT")";   [ -n "$v" ] && default_port="$v"
+      v="$(_extract_port_from_file "$f" "$jail")";     [ -n "$v" ] && jail_port="$v"
+    }
+
+    # Choose jail-specific if set; else DEFAULT; else literal "ssh"
+    local raw="${jail_port:-$default_port}"
+    [ -z "$raw" ] && raw="ssh"
+
+    # Resolve names -> numbers where possible
+    _resolve_tokens_to_ports "$raw"
+  }
+
+  _detect_fb_log() {
+    # pick fail2ban log source
+    if [ -f /var/log/fail2ban.log ]; then
+      echo "/var/log/fail2ban.log"
+    elif [ -f /var/log/fail2ban/fail2ban.log ]; then
+      echo "/var/log/fail2ban/fail2ban.log"
+    else
+      echo ""  # use journalctl fallback
+    fi
+  }
+
+  # ---------- main ----------
+  local ssh_ports fb_ports
+  ssh_ports="$(_detect_ssh_ports)"
   echo "SSH Port(s): $ssh_ports"
 
-  # --- Detect Fail2Ban sshd jail port(s) ---
-  fb_ports=$(grep -i "^[[:space:]]*port[[:space:]]*=" /etc/fail2ban/jail.local /etc/fail2ban/jail.d/*.conf 2>/dev/null \
-             | grep -m1 sshd | awk -F= '{print $2}' | xargs)
-  [ -z "$fb_ports" ] && fb_ports="(default 22 or ssh)"
+  fb_ports="$(_get_f2b_ports_for_jail "sshd")"
+  [ -z "$fb_ports" ] && fb_ports="ssh"
   echo "Fail2Ban Port(s): $fb_ports"
 
-  # --- Fail2Ban service status ---
-  if systemctl is-active --quiet fail2ban 2>/dev/null; then
-    fb_status="active (running)"
-  else
-    fb_status="inactive (stopped)"
+  # mismatch warning (simple string compare; normalize spaces)
+  if [ -n "$ssh_ports" ] && [ -n "$fb_ports" ]; then
+    if [ "$(echo "$ssh_ports" | tr -d ' ')" != "$(echo "$fb_ports" | tr -d ' ')" ]; then
+      echo "⚠️  WARNING: SSH is on $ssh_ports but Fail2Ban is monitoring $fb_ports"
+    fi
   fi
-  echo "Fail2Ban Service: $fb_status"
 
-  # --- Jail status (sshd) ---
+  # service status
+  if systemctl is-active --quiet fail2ban 2>/dev/null; then
+    echo "Fail2Ban Service: active (running)"
+  else
+    echo "Fail2Ban Service: inactive (stopped)"
+  fi
+
+  # jail summary (counts + banned list)
   if command -v fail2ban-client >/dev/null 2>&1; then
     echo
     echo "--- Jail: sshd ---"
-    sudo fail2ban-client status sshd 2>/dev/null | grep -E "Currently failed|Total failed|Currently banned|Total banned|Banned IP list"
+    sudo fail2ban-client status sshd 2>/dev/null \
+      | grep -E "Currently failed|Total failed|Currently banned|Total banned|Banned IP list" \
+      || echo "sshd jail not found or disabled."
   else
-    echo "Fail2Ban client not found!"
+    echo
+    echo "fail2ban-client not found."
+  fi
+
+  # recent attacker IPs (top offenders)
+  echo
+  echo "--- Recent offender IPs (last ~1000 lines) ---"
+  local logf offenders
+  logf="$(_detect_fb_log)"
+  if [ -n "$logf" ] && [ -r "$logf" ]; then
+    offenders=$(tail -n 1000 "$logf" \
+      | awk '/sshd/ && /Found/ { for (i=1;i<=NF;i++) if ($i ~ /([0-9]{1,3}\.){3}[0-9]{1,3}/) print $i }' \
+      | sort | uniq -c | sort -nr | head -n 15)
+    if [ -n "$offenders" ]; then
+      echo "$offenders" | sed 's/^/  /'
+    else
+      echo "  (no recent matches)"
+    fi
+  elif command -v journalctl >/dev/null 2>&1; then
+    offenders=$(journalctl -u fail2ban --since "24 hours ago" --no-pager 2>/dev/null \
+      | awk '/sshd/ && /Found/ { for (i=1;i<=NF;i++) if ($i ~ /([0-9]{1,3}\.){3}[0-9]{1,3}/) print $i }' \
+      | sort | uniq -c | sort -nr | head -n 15)
+    if [ -n "$offenders" ]; then
+      echo "$offenders" | sed 's/^/  /'
+    else
+      echo "  (no recent matches)"
+    fi
+  else
+    echo "  (no log source found)"
   fi
 
   echo "=============================="
 }
+
 
 
 # Docker Sub Menu

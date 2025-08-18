@@ -6,7 +6,7 @@ main_menu() {
     while true; do
         clear
         echo "▶ Main Menu"
-        echo "V0.3.0"
+        echo "V0.3.1"
         echo "------------------------"
         echo "1. System Information Query"
         echo "2. System Update"
@@ -704,7 +704,7 @@ set_dns() {
             for dns in "${final_ipv6_dns[@]}"; do
                 echo "nameserver $dns"
             done
-        fi
+        } > /etc/resolv.conf
     done
 
     # Update resolv.conf with the best DNS group

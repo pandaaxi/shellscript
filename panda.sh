@@ -13,13 +13,13 @@ main_menu() {
         echo "3. System Clean"
         echo "------------------------"
         echo "4. System Tools ▶"
- echo "5. Media Unblock Check ▶"
+        echo "5. Media Unblock Check ▶"
         echo "6. Docker Management ▶"
         echo "7. Trace Route ▶"
         echo "8. WARP Management ▶"
         echo "9. WGCF Management ▶"
         echo "10. BBR Management ▶"
- echo "11. Realm Management ▶"
+        echo "11. Realm Management ▶"
         echo "------------------------"
         echo "00. Script Update"
 
@@ -43,14 +43,14 @@ main_menu() {
                 system_tools
                 ;;
             5)
- media_unblock_check
- ;;
+                media_unblock_check
+                ;;
             6)
                 docker_management
                 ;;
             7)
- trace_route_menu
- ;;
+                trace_route_menu
+                ;;
             8)
                 warp_management
                 ;;
@@ -363,11 +363,10 @@ while true; do
     echo "1. Set DNS Address"
     echo "2. Set SSH Port"
     echo "3. Manage SSH Key Authentication"
+    echo "4. Install Fail2Ban"
     echo "------------------------"
-    echo "4. Swap Memory Management"
-    echo "5. Reboot Server"
-    echo "------------------------"
-    echo "6. Install Fail2Ban"
+    echo "5. Swap Memory Management"
+    echo "6. Reboot Server"
     echo "------------------------"
     echo "0. Return to Main Menu"
     echo "------------------------"
@@ -386,6 +385,9 @@ while true; do
             manage_ssh_key_auth
             ;;
         4)
+            install_fail2ban
+            ;;
+        5)
             while true; do
                 swap_used=$(free -m | awk 'NR==3{print $3}')
                 swap_total=$(free -m | awk 'NR==3{print $2}')
@@ -425,11 +427,8 @@ while true; do
                 esac
             done
             ;;
-        5)
-            reboot_server
-            ;;
         6)
-            install_fail2ban
+            reboot_server
             ;;
         0)
             break  # Exit the loop, return to the main menu
@@ -518,7 +517,7 @@ set_dns() {
         echo "dig command is not available. Installing dnsutils..."
         apt update && apt install -y dnsutils
     fi
-install_fail2ban 
+
     # DNS servers to test
     local ipv4_dns_servers=("1.1.1.1" "1.0.0.1" "8.8.8.8" "8.8.4.4")
     local ipv6_dns_servers=("2606:4700:4700::1111" "2606:4700:4700::1001" "2001:4860:4860::8888" "2001:4860:4860::8844")

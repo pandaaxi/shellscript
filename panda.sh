@@ -893,38 +893,24 @@ install_fail2ban() {
 
   detect_ssh_ports() {
     local ports=""
-
-    # 1) Best: effective config from sshd
     if command -v sshd >/dev/null 2>&1; then
-      # Some distros require -C for sshd -T to work without a TTY
       ports=$(sshd -T 2>/dev/null | awk '/^port /{print $2}' | paste -sd, -) || true
       if [ -z "$ports" ]; then
         ports=$(sshd -T -C user=root,host="$(hostname)",addr=127.0.0.1 2>/dev/null \
                 | awk '/^port /{print $2}' | paste -sd, -) || true
       fi
     fi
-
-    # 2) Fallback: parse sshd_config for Port lines (first non-comment)
     if [ -z "$ports" ] && [ -r /etc/ssh/sshd_config ]; then
-      ports=$(awk '
-        $1 ~ /^Port$/ && $2 ~ /^[0-9]+$/ { print $2 }
-      ' /etc/ssh/sshd_config | paste -sd, -)
+      ports=$(awk '$1 ~ /^Port$/ && $2 ~ /^[0-9]+$/ { print $2 }' /etc/ssh/sshd_config | paste -sd, -)
     fi
-
-    # 3) Last resort: check listening sockets for sshd
     if [ -z "$ports" ]; then
       if command -v ss >/dev/null 2>&1; then
-        ports=$(ss -tuln | awk '/:([0-9]+)\s/ && /ssh/ { match($0, /:([0-9]+)/, a); if (a[1]!="") print a[1] }' \
-                | sort -u | paste -sd, -)
+        ports=$(ss -tuln | awk '/ssh/ { if (match($0, /:([0-9]+)/, a)) print a[1] }' | sort -u | paste -sd, -)
       elif command -v netstat >/dev/null 2>&1; then
-        ports=$(netstat -tuln | awk '/:([0-9]+)\s/ && /ssh/ { match($0, /:([0-9]+)/, a); if (a[1]!="") print a[1] }' \
-                | sort -u | paste -sd, -)
+        ports=$(netstat -tuln 2>/dev/null | awk '/ssh/ { if (match($0, /:([0-9]+)/, a)) print a[1] }' | sort -u | paste -sd, -)
       fi
     fi
-
-    # Default to 22 if still unknown
-    if [ -z "$ports" ]; then ports="22"; fi
-
+    [ -z "$ports" ] && ports="22"
     echo "$ports"
   }
 
@@ -936,49 +922,121 @@ install_fail2ban() {
     export DEBIAN_FRONTEND=noninteractive
     apt update -y
     apt install -y fail2ban
-    systemctl enable fail2ban
+    if command -v systemctl >/dev/null 2>&1; then
+      apt install -y python3-systemd
+    fi
   elif [ -f "/etc/alpine-release" ]; then
     apk update
     apk add fail2ban
-    rc-update add fail2ban default
   else
-    echo "Warning: Unsupported distro auto-install. Please install fail2ban manually."
+    echo "Warning: unsupported distro. Install fail2ban manually."
   fi
 
-  # Choose a reasonable auth log path
-  auth_log=""
-  for f in /var/log/auth.log /var/log/secure /var/log/messages; do
-    [ -f "$f" ] && auth_log="$f" && break
-  done
-  [ -z "$auth_log" ] && auth_log="/var/log/auth.log"  # default guess
+  # Auto-pick firewall action
+  pick_banaction() {
+    if command -v nft >/dev/null 2>&1; then
+      echo "nftables-multiport"
+    elif command -v iptables >/dev/null 2>&1; then
+      echo "iptables-multiport"
+    else
+      echo ""
+    fi
+  }
+  banaction="$(pick_banaction)"
 
-  # Write jail.local to ensure sshd jail matches detected port(s)
+  have_systemd=false
+  if command -v systemctl >/dev/null 2>&1 && pidof systemd >/dev/null 2>&1; then
+    have_systemd=true
+  fi
+
+  auth_log=""
+  if [ "$have_systemd" = false ]; then
+    for f in /var/log/auth.log /var/log/secure /var/log/messages; do
+      [ -f "$f" ] && auth_log="$f" && break
+    done
+    [ -z "$auth_log" ] && auth_log="/var/log/auth.log"
+  fi
+
   mkdir -p /etc/fail2ban
-  cat >/etc/fail2ban/jail.local <<EOF
+
+  if [ "$have_systemd" = true ]; then
+    cat >/etc/fail2ban/jail.local <<EOF
 [DEFAULT]
-# You can tune bantime/findtime/maxretry here if needed
+maxretry = 5
+$( [ -n "$banaction" ] && echo "banaction = $banaction" )
 
 [sshd]
 enabled = true
 port    = ${ssh_ports}
 filter  = sshd
-logpath = ${auth_log}
-backend = auto
-maxretry = 5
+backend = systemd
+journalmatch = _COMM=sshd
 EOF
-
-  # Start / restart service
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl restart fail2ban || systemctl start fail2ban
-    systemctl status --no-pager fail2ban || true
   else
-    rc-service fail2ban restart || rc-service fail2ban start
-    rc-service fail2ban status || true
+    cat >/etc/fail2ban/jail.local <<EOF
+[DEFAULT]
+maxretry = 5
+$( [ -n "$banaction" ] && echo "banaction = $banaction" )
+
+[sshd]
+enabled = true
+port    = ${ssh_ports}
+filter  = sshd
+backend = auto
+logpath = ${auth_log}
+EOF
   fi
 
-  echo "Fail2Ban installation & SSH jail configured for port(s): ${ssh_ports}"
+  echo "Validating configuration..."
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    fail2ban-client -t
+  fi
+
+  echo "Starting Fail2Ban..."
+  if [ "$have_systemd" = true ]; then
+    systemctl daemon-reload || true
+    systemctl enable --now fail2ban || true
+  else
+    rc-update add fail2ban default || true
+    rc-service fail2ban restart || rc-service fail2ban start
+  fi
+
+  # ---- WAIT FOR SERVER SOCKET (fixes your error) ----
+  wait_for_f2b() {
+    # Wait up to ~10s for the socket & a positive ping
+    for i in $(seq 1 20); do
+      if fail2ban-client ping >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep 0.5
+    done
+    return 1
+  }
+
+  if ! wait_for_f2b; then
+    echo "Fail2Ban did not respond to ping in time. Showing service status:"
+    if [ "$have_systemd" = true ]; then
+      systemctl status --no-pager fail2ban || true
+      journalctl -u fail2ban -n 50 --no-pager || true
+    else
+      rc-service fail2ban status || true
+      tail -n 50 /var/log/fail2ban.log 2>/dev/null || true
+    fi
+  fi
+
+  # Health summary (no scary errors)
+  if command -v fail2ban-client >/dev/null 2>&1; then
+    echo
+    echo "Fail2Ban summary:"
+    fail2ban-client status || true
+    echo
+    fail2ban-client status sshd || true
+  fi
+
+  echo "Done. SSH jail configured on port(s): ${ssh_ports}"
   echo "Verify with: sudo fail2ban-client status sshd"
 }
+
 
 fail2ban_status() {
   set -u

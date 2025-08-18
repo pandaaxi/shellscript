@@ -705,7 +705,6 @@ set_dns() {
                 echo "nameserver $dns"
             done
         } > /etc/resolv.conf
-    done
 
     # Update resolv.conf with the best DNS group
     echo "Best IPv4 DNS servers are: ${best_ipv4_group[@]} with response time: ${best_ipv4_time} ms"

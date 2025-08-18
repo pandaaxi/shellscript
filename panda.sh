@@ -519,46 +519,191 @@ set_dns() {
     fi
 
     # DNS servers to test
-    local ipv4_dns_servers=("1.1.1.1" "1.0.0.1" "8.8.8.8" "8.8.4.4")
-    local ipv6_dns_servers=("2606:4700:4700::1111" "2606:4700:4700::1001" "2001:4860:4860::8888" "2001:4860:4860::8844")
+    local cf_ipv4_primary="1.1.1.1"
+    local cf_ipv4_secondary="1.0.0.1"
+    local google_ipv4_primary="8.8.8.8"
+    local google_ipv4_secondary="8.8.4.4"
 
-    # Initialize variables for best DNS
-    local best_ipv4_time=100000  # Start with a very high value
-    local best_ipv4_group=()
-
-    local best_ipv6_time=100000  # Start with a very high value
-    local best_ipv6_group=()
+    local cf_ipv6_primary="2606:4700:4700::1111"
+    local cf_ipv6_secondary="2606:4700:4700::1001"
+    local google_ipv6_primary="2001:4860:4860::8888"
+    local google_ipv6_secondary="2001:4860:4860::8844"
 
     # Function to test DNS response time
     test_dns() {
         local dns_server=$1
         local response_time=$(dig @$dns_server $domain +stats | grep "Query time:" | awk '{print $4}')
-        echo $response_time
+ if [ -z "$response_time" ]; then
+            echo 99999 # Return a high value if dig fails
+ else
+            echo $response_time
+ fi
     }
 
-    # Test each IPv4 DNS server
-    for dns in "${ipv4_dns_servers[@]}"; do
-        response_time=$(test_dns $dns)
-        echo "IPv4 DNS: $dns, Response Time: ${response_time} ms"
+    # Function to determine the company of a DNS server
+    get_company() {
+        local dns_server=$1
+        case "$dns_server" in
+            "$cf_ipv4_primary" | "$cf_ipv4_secondary" | "$cf_ipv6_primary" | "$cf_ipv6_secondary") echo "Cloudflare" ;;
+            "$google_ipv4_primary" | "$google_ipv4_secondary" | "$google_ipv6_primary" | "$google_ipv6_secondary") echo "Google" ;;
+            *) echo "Unknown" ;;
+        esac
+    }
 
-        if [[ $response_time -lt $best_ipv4_time ]]; then
-            best_ipv4_time=$response_time
-            best_ipv4_group=($dns)
-        elif [[ $response_time -eq $best_ipv4_time ]]; then
-            best_ipv4_group+=($dns)
+    # --- IPv4 Logic ---
+    echo "Testing IPv4 DNS servers..."
+
+    # Round 1: Test Primary Servers
+    time_cf_ipv4_primary=$(test_dns "$cf_ipv4_primary")
+    echo "IPv4 Primary Cloudflare ($cf_ipv4_primary): ${time_cf_ipv4_primary} ms"
+    time_google_ipv4_primary=$(test_dns "$google_ipv4_primary")
+    echo "IPv4 Primary Google ($google_ipv4_primary): ${time_google_ipv4_primary} ms"
+
+    if [[ $time_cf_ipv4_primary -lt $time_google_ipv4_primary ]]; then
+        primary_winner_ipv4="$cf_ipv4_primary"
+        primary_company_ipv4="Cloudflare"
+    else
+        primary_winner_ipv4="$google_ipv4_primary"
+ primary_company_ipv4="Google"
+    fi
+    echo "Primary IPv4 winner: $primary_winner_ipv4 ($primary_company_ipv4)"
+
+    # Round 1: Test Secondary Servers
+    time_cf_ipv4_secondary_r1=$(test_dns "$cf_ipv4_secondary")
+    echo "IPv4 Secondary Cloudflare ($cf_ipv4_secondary): ${time_cf_ipv4_secondary_r1} ms"
+    time_google_ipv4_secondary_r1=$(test_dns "$google_ipv4_secondary")
+    echo "IPv4 Secondary Google ($google_ipv4_secondary): ${time_google_ipv4_secondary_r1} ms"
+
+    if [[ $time_cf_ipv4_secondary_r1 -lt $time_google_ipv4_secondary_r1 ]]; then
+        secondary_winner_r1_ipv4="$cf_ipv4_secondary"
+        secondary_company_r1_ipv4="Cloudflare"
+    else
+        secondary_winner_r1_ipv4="$google_ipv4_secondary"
+ secondary_company_r1_ipv4="Google"
+    fi
+    echo "Secondary IPv4 Round 1 winner: $secondary_winner_r1_ipv4 ($secondary_company_r1_ipv4)"
+
+    final_ipv4_dns=()
+
+    # Conditional Retest of Secondary Servers (Round 2)
+    if [[ "$secondary_company_r1_ipv4" != "$primary_company_ipv4" ]]; then
+        echo "Secondary IPv4 Round 1 winner is from a different company than primary. Retesting secondary servers..."
+        time_cf_ipv4_secondary_r2=$(test_dns "$cf_ipv4_secondary")
+        echo "IPv4 Secondary Cloudflare ($cf_ipv4_secondary) Retest: ${time_cf_ipv4_secondary_r2} ms"
+        time_google_ipv4_secondary_r2=$(test_dns "$google_ipv4_secondary")
+        echo "IPv4 Secondary Google ($google_ipv4_secondary) Retest: ${time_google_ipv4_secondary_r2} ms"
+
+ if [[ $time_cf_ipv4_secondary_r2 -lt $time_google_ipv4_secondary_r2 ]]; then
+ secondary_winner_r2_ipv4="$cf_ipv4_secondary"
+ secondary_company_r2_ipv4="Cloudflare"
+ else
+ secondary_winner_r2_ipv4="$google_ipv4_secondary"
+ secondary_company_r2_ipv4="Google"
+ fi
+ echo "Secondary IPv4 Round 2 winner: $secondary_winner_r2_ipv4 ($secondary_company_r2_ipv4)"
+
+        # Determine Final IPv4 DNS after Retest
+        if [[ "$secondary_company_r2_ipv4" == "$primary_company_ipv4" ]]; then
+            final_ipv4_dns+=("$primary_winner_ipv4")
+            if [[ "$primary_company_ipv4" == "Cloudflare" ]]; then
+                final_ipv4_dns+=("$cf_ipv4_secondary")
+            else
+                final_ipv4_dns+=("$google_ipv4_secondary")
+            fi
+        else
+            final_ipv4_dns+=("$primary_winner_ipv4")
         fi
-    done
+    else
+        # Determine Final IPv4 DNS (No Retest Needed)
+        final_ipv4_dns+=("$primary_winner_ipv4")
+        final_ipv4_dns+=("$secondary_winner_r1_ipv4")
+    fi
 
-    # Test each IPv6 DNS server
-    for dns in "${ipv6_dns_servers[@]}"; do
-        response_time=$(test_dns $dns)
-        echo "IPv6 DNS: $dns, Response Time: ${response_time} ms"
+    # --- IPv6 Logic ---
+    echo ""
+    echo "Testing IPv6 DNS servers..."
 
-        if [[ $response_time -lt $best_ipv6_time ]]; then
-            best_ipv6_time=$response_time
-            best_ipv6_group=($dns)
-        elif [[ $response_time -eq $best_ipv6_time ]]; then
-            best_ipv6_group+=($dns)
+    # Round 1: Test Primary Servers
+    time_cf_ipv6_primary=$(test_dns "$cf_ipv6_primary")
+    echo "IPv6 Primary Cloudflare ($cf_ipv6_primary): ${time_cf_ipv6_primary} ms"
+    time_google_ipv6_primary=$(test_dns "$google_ipv6_primary")
+    echo "IPv6 Primary Google ($google_ipv6_primary): ${time_google_ipv6_primary} ms"
+
+    if [[ $time_cf_ipv6_primary -lt $time_google_ipv6_primary ]]; then
+        primary_winner_ipv6="$cf_ipv6_primary"
+        primary_company_ipv6="Cloudflare"
+    else
+        primary_winner_ipv6="$google_ipv6_primary"
+ primary_company_ipv6="Google"
+    fi
+    echo "Primary IPv6 winner: $primary_winner_ipv6 ($primary_company_ipv6)"
+
+    # Round 1: Test Secondary Servers
+    time_cf_ipv6_secondary_r1=$(test_dns "$cf_ipv6_secondary")
+    echo "IPv6 Secondary Cloudflare ($cf_ipv6_secondary): ${time_cf_ipv6_secondary_r1} ms"
+    time_google_ipv6_secondary_r1=$(test_dns "$google_ipv6_secondary")
+    echo "IPv6 Secondary Google ($google_ipv6_secondary): ${time_google_ipv6_secondary_r1} ms"
+
+    if [[ $time_cf_ipv6_secondary_r1 -lt $time_google_ipv6_secondary_r1 ]]; then
+        secondary_winner_r1_ipv6="$cf_ipv6_secondary"
+        secondary_company_r1_ipv6="Cloudflare"
+    else
+        secondary_winner_r1_ipv6="$google_ipv6_secondary"
+ secondary_company_r1_ipv6="Google"
+    fi
+    echo "Secondary IPv6 Round 1 winner: $secondary_winner_r1_ipv6 ($secondary_company_r1_ipv6)"
+
+    final_ipv6_dns=()
+
+    # Conditional Retest of Secondary Servers (Round 2)
+    if [[ "$secondary_company_r1_ipv6" != "$primary_company_ipv6" ]]; then
+        echo "Secondary IPv6 Round 1 winner is from a different company than primary. Retesting secondary servers..."
+        time_cf_ipv6_secondary_r2=$(test_dns "$cf_ipv6_secondary")
+        echo "IPv6 Secondary Cloudflare ($cf_ipv6_secondary) Retest: ${time_cf_ipv6_secondary_r2} ms"
+        time_google_ipv6_secondary_r2=$(test_dns "$google_ipv6_secondary")
+        echo "IPv6 Secondary Google ($google_ipv6_secondary) Retest: ${time_google_ipv6_secondary_r2} ms"
+
+ if [[ $time_cf_ipv6_secondary_r2 -lt $time_google_ipv6_secondary_r2 ]]; then
+ secondary_winner_r2_ipv6="$cf_ipv6_secondary"
+ secondary_company_r2_ipv6="Cloudflare"
+ else
+ secondary_winner_r2_ipv6="$google_ipv6_secondary"
+ secondary_company_r2_ipv6="Google"
+ fi
+ echo "Secondary IPv6 Round 2 winner: $secondary_winner_r2_ipv6 ($secondary_company_r2_ipv6)"
+
+        # Determine Final IPv6 DNS after Retest
+        if [[ "$secondary_company_r2_ipv6" == "$primary_company_ipv6" ]]; then
+            final_ipv6_dns+=("$primary_winner_ipv6")
+            if [[ "$primary_company_ipv6" == "Cloudflare" ]]; then
+                final_ipv6_dns+=("$cf_ipv6_secondary")
+            else
+                final_ipv6_dns+=("$google_ipv6_secondary")
+            fi
+        else
+            final_ipv6_dns+=("$primary_winner_ipv6")
+        fi
+    else
+        # Determine Final IPv6 DNS (No Retest Needed)
+        final_ipv6_dns+=("$primary_winner_ipv6")
+        final_ipv6_dns+=("$secondary_winner_r1_ipv6")
+    fi
+
+    # Update resolv.conf with the final DNS group
+    echo ""
+    echo "Final IPv4 DNS servers: ${final_ipv4_dns[@]}"
+    echo "Final IPv6 DNS servers: ${final_ipv6_dns[@]}"
+
+    if [[ ${#final_ipv4_dns[@]} -gt 0 ]] || [[ ${#final_ipv6_dns[@]} -gt 0 ]]; then
+        echo "Updating /etc/resolv.conf with DNS:"
+        {
+            for dns in "${final_ipv4_dns[@]}"; do
+                echo "nameserver $dns"
+            done
+
+            for dns in "${final_ipv6_dns[@]}"; do
+                echo "nameserver $dns"
+            done
         fi
     done
 

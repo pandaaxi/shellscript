@@ -482,6 +482,8 @@ trace_route_menu() {
         echo "1. Install"
         echo "2. Trace Lsize"
         echo "3. Trace Ssize"
+ echo "4. Trace Manual"
+
         echo "------------------------"
         echo "0. Return to Main Menu"
         echo "------------------------"
@@ -504,6 +506,11 @@ trace_route_menu() {
                 nexttrace -T --psize 64 $ip_address -p 80
                 read -p "Press any key to continue..." key
                 ;;
+            4)
+                trace_manual
+                read -p "Press any key to continue..." key
+                ;;
+
             0)
                 break  # Exit the loop, return to the main menu
                 ;;
@@ -513,6 +520,25 @@ trace_route_menu() {
         esac
     done
 }
+# Function for manual trace route
+trace_manual() {
+    clear
+    read -p "Enter the IP address to trace: " -r ip_address
+
+    read -p "Enter optional packet size (--psize, default 1450): " -r psize
+
+    local command="nexttrace -T $ip_address -p 80"
+
+    if [ -n "$psize" ]; then
+        command="nexttrace -T --psize $psize $ip_address -p 80"
+    else
+        command="nexttrace -T --psize 1450 $ip_address -p 80"
+    fi
+
+    echo "Running command: $command"
+    eval "$command"
+}
+
 # Function to test DNS response time and update resolv.conf with the best DNS group
 set_dns() {
     #-----------------------------

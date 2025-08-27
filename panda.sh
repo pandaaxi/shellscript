@@ -6,7 +6,7 @@ main_menu() {
     while true; do
         clear
         echo "▶ Main Menu"
-        echo "V0.3.6"
+        echo "V0.4.0"
         echo "------------------------"
         echo "1. System Information Query"
         echo "2. System Update"
@@ -1809,10 +1809,24 @@ _persist_rules() {
     fi
 }
 
-# ---- Menu ----
+# --- helper to render current NAT rules before the menu and after actions ---
+_render_nat_snapshot() {
+    clear
+    echo "▶ Current IPTables NAT Rules (v4)"
+    echo "---------------------------------"
+    _require_root && _list_nat iptables
+    echo
+    echo "▶ Current IPTables NAT Rules (v6)"
+    echo "---------------------------------"
+    _require_root && _list_nat ip6tables
+    echo
+}
+
 iptables_management() {
     while true; do
-        clear
+        # always show latest NAT rules before showing the menu
+        _render_nat_snapshot
+
         echo "▶ IPTables Management"
         echo "------------------------"
         echo "1. List IPTables NAT rules v4"
@@ -1842,10 +1856,13 @@ iptables_management() {
             9) _require_root && _persist_rules ;;
             *) echo "Invalid input!" ;;
         esac
-        echo
+
+        # after any action (add/delete/block/etc), re-render the rules so you see changes immediately
+        _render_nat_snapshot
         read -p "Press any key to continue..." _
     done
 }
+
 
 
 

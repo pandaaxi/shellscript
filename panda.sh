@@ -20,6 +20,7 @@ main_menu() {
         echo "9. WGCF Management ▶"
         echo "10. BBR Management ▶"
         echo "11. Realm Management ▶"
+        echo "12. IPTables Management ▶"
         echo "------------------------"
         echo "00. Script Update"
 
@@ -62,6 +63,9 @@ main_menu() {
                 ;;
             11)
                 realm_management
+                ;;
+            12)
+                iptables_management
                 ;;
             00)
                 update_script
@@ -1703,5 +1707,146 @@ realm_management() {
     echo "Realm Management completed. Returning to Main Menu."
     read -p "Press any key to continue..." key
 }
+
+# IPTables Management Submenu
+# ---- Helpers ----
+_require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "Please run this script as root (or with sudo)."
+        read -p "Press any key to continue..." _
+        return 1
+    fi
+    return 0
+}
+
+_list_nat() {
+    local cmd="$1"  # iptables or ip6tables
+    $cmd -t nat -L -n -v --line-numbers 2>/dev/null || {
+        echo "No NAT table or no rules for $cmd."
+    }
+}
+
+_add_udp_redirect() {
+    # $1 = iptables|ip6tables
+    local cmd="$1"
+    echo "Add UDP Port Redirect ($cmd)"
+
+    echo "Available network interfaces:"
+    ip -o link show | awk -F': ' '{print " - " $2}'   # list interfaces
+
+    read -p "Interface: " IFACE
+    read -p "Destination UDP port or range to catch (23001 or 23001:23900): " DPORT
+    read -p "Local port to redirect to (23001): " TOPORT
+
+    if [[ -z "$IFACE" || -z "$DPORT" || -z "$TOPORT" ]]; then
+        echo "Missing values."; return
+    fi
+
+    if $cmd -t nat -A PREROUTING -i "$IFACE" -p udp --dport "$DPORT" -j REDIRECT --to-ports "$TOPORT" 2>/dev/null; then
+        echo "Rule added:"
+        echo "$cmd -t nat -A PREROUTING -i $IFACE -p udp --dport $DPORT -j REDIRECT --to-ports $TOPORT"
+    else
+        echo "Failed to add rule."
+    fi
+}
+
+
+_delete_nat_rule_by_number() {
+    # $1 = iptables|ip6tables
+    local cmd="$1"
+    echo "Current NAT rules ($cmd):"
+    $cmd -t nat -L PREROUTING -n -v --line-numbers 2>/dev/null || { echo "No PREROUTING chain."; return; }
+    read -p "Enter line number to DELETE from PREROUTING (blank to cancel): " LINENO
+    [[ -z "$LINENO" ]] && { echo "Cancelled."; return; }
+    if $cmd -t nat -D PREROUTING "$LINENO" 2>/dev/null; then
+        echo "Deleted rule #$LINENO from PREROUTING."
+    else
+        echo "Failed to delete rule #$LINENO."
+    fi
+}
+
+_block_ip() {
+    # $1 = iptables|ip6tables
+    local cmd="$1"
+    local family="$2"  # v4|v6
+    echo "Block specific IP address ($family)"
+    read -p "IP to block: " IP
+    [[ -z "$IP" ]] && { echo "No IP given."; return; }
+    if $cmd -C INPUT -s "$IP" -j DROP 2>/dev/null; then
+        echo "Already blocked."
+        return
+    fi
+    if $cmd -A INPUT -s "$IP" -j DROP 2>/dev/null; then
+        echo "Blocked $IP on INPUT."
+    else
+        echo "Failed to add block rule."
+    fi
+}
+
+_persist_rules() {
+    # Try netfilter-persistent first; else fall back to saving files
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+        netfilter-persistent save && echo "Saved via netfilter-persistent." && return
+    fi
+    if command -v service >/dev/null 2>&1 && service netfilter-persistent status >/dev/null 2>&1; then
+        netfilter-persistent save && echo "Saved via netfilter-persistent." && return
+    fi
+    # Fallback: write to rules files if the dirs exist
+    local did=0
+    if [[ -d /etc/iptables ]]; then
+        iptables-save > /etc/iptables/rules.v4 && echo "Saved v4 to /etc/iptables/rules.v4" && did=1
+        ip6tables-save > /etc/iptables/rules.v6 && echo "Saved v6 to /etc/iptables/rules.v6" && did=1
+    elif [[ -d /etc ]]; then
+        # create directory if reasonable
+        mkdir -p /etc/iptables
+        iptables-save > /etc/iptables/rules.v4 && echo "Saved v4 to /etc/iptables/rules.v4" && did=1
+        ip6tables-save > /etc/iptables/rules.v6 && echo "Saved v6 to /etc/iptables/rules.v6" && did=1
+    fi
+    if [[ $did -eq 0 ]]; then
+        echo "Could not persist automatically. Consider installing iptables-persistent:"
+        echo "  apt install -y iptables-persistent   # Debian/Ubuntu"
+        echo "Then run: netfilter-persistent save"
+    fi
+}
+
+# ---- Menu ----
+iptables_management() {
+    while true; do
+        clear
+        echo "▶ IPTables Management"
+        echo "------------------------"
+        echo "1. List IPTables NAT rules v4"
+        echo "2. List IPTables NAT rules v6"
+        echo "3. Add UDP Port redirect v4"
+        echo "4. Add UDP Port redirect v6"
+        echo "5. Delete UDP Port redirect v4 (by line number)"
+        echo "6. Delete UDP Port redirect v6 (by line number)"
+        echo "7. Block specific IP address v4"
+        echo "8. Block specific IP address v6"
+        echo "9. Persist current rules"
+        echo "------------------------"
+        echo "0. Return to Main Menu"
+        echo "------------------------"
+        read -p "Enter your choice: " sub_choice
+
+        case "$sub_choice" in
+            0) break ;;
+            1) _require_root && _list_nat iptables ;;
+            2) _require_root && _list_nat ip6tables ;;
+            3) _require_root && _add_udp_redirect iptables ;;
+            4) _require_root && _add_udp_redirect ip6tables ;;
+            5) _require_root && _delete_nat_rule_by_number iptables ;;
+            6) _require_root && _delete_nat_rule_by_number ip6tables ;;
+            7) _require_root && _block_ip iptables v4 ;;
+            8) _require_root && _block_ip ip6tables v6 ;;
+            9) _require_root && _persist_rules ;;
+            *) echo "Invalid input!" ;;
+        esac
+        echo
+        read -p "Press any key to continue..." _
+    done
+}
+
+
 
 main_menu

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Global configuration
-SCRIPT_VERSION="0.4.3"
+SCRIPT_VERSION="0.5"
 MENU_DIVIDER="------------------------"
 
 # Legacy color variables used by existing messages
@@ -1795,6 +1795,31 @@ _has_nat_prerouting_rules() {
     $cmd -t nat -S PREROUTING 2>/dev/null | grep -qE '^-A PREROUTING '
 }
 
+_extract_nat_prerouting_from_stream() {
+    awk '
+        BEGIN { in_nat=0 }
+        /^\*nat$/ { in_nat=1; next }
+        /^\*/ { if (in_nat) in_nat=0 }
+        in_nat && /^-A PREROUTING / { print }
+    '
+}
+
+_nat_prerouting_matches_saved() {
+    # $1 = iptables-save|ip6tables-save
+    # $2 = saved rules file path
+    local save_cmd="$1"
+    local rules_file="$2"
+
+    command -v "$save_cmd" >/dev/null 2>&1 || return 1
+    [[ -f "$rules_file" ]] || return 1
+
+    local live_rules saved_rules
+    live_rules=$($save_cmd 2>/dev/null | _extract_nat_prerouting_from_stream)
+    saved_rules=$(_extract_nat_prerouting_from_stream < "$rules_file" 2>/dev/null)
+
+    [[ "$live_rules" == "$saved_rules" ]]
+}
+
 _get_persist_status() {
     local backend="none"
     local restore_enabled=0
@@ -1820,11 +1845,11 @@ _get_persist_status() {
     fi
 
     if [[ "$restore_enabled" -eq 1 ]]; then
-        if command -v iptables-save >/dev/null 2>&1 && [[ -s "$v4_file" ]]; then
-            cmp -s <(iptables-save) "$v4_file" || unsaved=1
+        if _has_nat_prerouting_rules iptables; then
+            _nat_prerouting_matches_saved iptables-save "$v4_file" || unsaved=1
         fi
-        if command -v ip6tables-save >/dev/null 2>&1 && [[ -s "$v6_file" ]]; then
-            cmp -s <(ip6tables-save) "$v6_file" || unsaved=1
+        if _has_nat_prerouting_rules ip6tables; then
+            _nat_prerouting_matches_saved ip6tables-save "$v6_file" || unsaved=1
         fi
     fi
 
@@ -1833,7 +1858,7 @@ _get_persist_status() {
     elif [[ ! -s "$v4_file" && ! -s "$v6_file" ]]; then
         echo "Persistence: CONFIGURED but no saved rules files (rules may reset)"
     elif [[ "$unsaved" -eq 1 ]]; then
-        echo "Persistence: PARTIAL (auto-restore configured via $backend, but current rules are not fully saved)"
+        echo "Persistence: PARTIAL (auto-restore configured via $backend, but current NAT PREROUTING rules are not fully saved)"
     else
         echo "Persistence: OK (auto-restore via $backend; rules should survive reboot)"
     fi

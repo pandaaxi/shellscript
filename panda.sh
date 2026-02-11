@@ -1,89 +1,121 @@
 #!/bin/bash
 
-# Menu
+# Global configuration
+SCRIPT_VERSION="0.4.1"
+MENU_DIVIDER="------------------------"
 
+# Legacy color variables used by existing messages
+huang="\033[33m"
+bai="\033[0m"
+lv="\033[32m"
+
+# Shared helpers
+pause_screen() {
+    read -r -p "Press any key to continue..." _
+}
+
+show_invalid_input() {
+    echo "Invalid input! Please enter a valid option."
+}
+
+has_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+get_current_ssh_port() {
+    local port
+    port=$(awk '$1 ~ /^Port$/ && $2 ~ /^[0-9]+$/ { print $2; exit }' /etc/ssh/sshd_config 2>/dev/null)
+    echo "${port:-22}"
+}
+
+get_swap_info() {
+    local swap_used swap_total swap_percentage
+    swap_used=$(free -m | awk 'NR==3{print $3}')
+    swap_total=$(free -m | awk 'NR==3{print $2}')
+
+    if [ "${swap_total:-0}" -eq 0 ]; then
+        swap_percentage=0
+    else
+        swap_percentage=$((swap_used * 100 / swap_total))
+    fi
+
+    echo "${swap_used:-0}MB/${swap_total:-0}MB (${swap_percentage}%)"
+}
+
+restart_ssh() {
+    if has_command systemctl; then
+        systemctl restart sshd 2>/dev/null || systemctl restart ssh
+        return $?
+    fi
+
+    if has_command service; then
+        service ssh restart 2>/dev/null || service sshd restart
+        return $?
+    fi
+
+    if [ -x /etc/init.d/sshd ]; then
+        /etc/init.d/sshd restart
+        return $?
+    fi
+
+    if [ -x /etc/init.d/ssh ]; then
+        /etc/init.d/ssh restart
+        return $?
+    fi
+
+    echo "Unable to restart SSH service automatically."
+    return 1
+}
+
+# Menu
 main_menu() {
     while true; do
         clear
-        echo "▶ Main Menu"
-        echo "V0.4.0"
-        echo "------------------------"
+        echo "Main Menu"
+        echo "V${SCRIPT_VERSION}"
+        echo "$MENU_DIVIDER"
         echo "1. System Information Query"
         echo "2. System Update"
         echo "3. System Clean"
-        echo "------------------------"
-        echo "4. System Tools ▶"
-        echo "5. Media Unblock Check ▶"
-        echo "6. Docker Management ▶"
-        echo "7. Trace Route ▶"
-        echo "8. WARP Management ▶"
-        echo "9. WGCF Management ▶"
-        echo "10. BBR Management ▶"
-        echo "11. Realm Management ▶"
-        echo "12. IPTables Management ▶"
-        echo "------------------------"
+        echo "$MENU_DIVIDER"
+        echo "4. System Tools >"
+        echo "5. Media Unblock Check >"
+        echo "6. Docker Management >"
+        echo "7. Trace Route >"
+        echo "8. WARP Management >"
+        echo "9. WGCF Management >"
+        echo "10. BBR Management >"
+        echo "11. Realm Management >"
+        echo "12. IPTables Management >"
+        echo "$MENU_DIVIDER"
         echo "00. Script Update"
-
+        echo
         echo "99. Uninstall Panda"
         echo "0. Quit"
-        echo "------------------------"
-        read -p "Enter your choice: " choice
+        echo "$MENU_DIVIDER"
+        read -r -p "Enter your choice: " choice
 
-
-        case $choice in
-            1)
-                system_info_query
-                ;;
-            2)
-                system_update
-                ;;
-            3)
-                system_clean
-                ;;
-            4)
-                system_tools
-                ;;
-            5)
-                media_unblock_check
-                ;;
-            6)
-                docker_management
-                ;;
-            7)
-                trace_route_menu
-                ;;
-            8)
-                warp_management
-                ;;
-            9)
-                wgcf
-                ;;
-            10)
-                bbr_management
-                ;;
-            11)
-                realm_management
-                ;;
-            12)
-                iptables_management
-                ;;
-            00)
-                update_script
-                ;;
-            99)
-                uninstall_panda
-                ;;
-            0)
-                quit_script
-                ;;
-            *)
-                echo "Invalid input! Please enter a valid option."
-                ;;
+        case "$choice" in
+            1) system_info_query ;;
+            2) system_update ;;
+            3) system_clean ;;
+            4) system_tools ;;
+            5) media_unblock_check ;;
+            6) docker_management ;;
+            7) trace_route_menu ;;
+            8) warp_management ;;
+            9) wgcf ;;
+            10) bbr_management ;;
+            11) realm_management ;;
+            12) iptables_management ;;
+            00) update_script ;;
+            99) uninstall_panda ;;
+            0) quit_script ;;
+            *) show_invalid_input ;;
         esac
-        read -p "Press any key to continue..." key
+        pause_screen
     done
 }
-
 # Function to quit the script
 quit_script() {
     echo "Quitting the script. Goodbye!"
@@ -93,25 +125,34 @@ quit_script() {
 # Function to handle post-submenu actions
 break_end() {
     echo "Returning to the previous menu..."
-    read -p "Press any key to continue..." key
+    pause_screen
 }
-
 # Function to open necessary iptables ports after SSH port change
 iptables_open() {
-    new_port=$1
+    local new_port="$1"
+
+    if [ -z "$new_port" ]; then
+        echo "No SSH port provided to iptables_open."
+        return 1
+    fi
+
     echo "Updating iptables to allow new SSH port: $new_port"
-    
+
     # Allow the new SSH port in iptables (IPv4 and IPv6)
-    iptables -A INPUT -p tcp --dport $new_port -j ACCEPT
-    ip6tables -A INPUT -p tcp --dport $new_port -j ACCEPT
-    
-    # Save iptables changes to ensure they persist after reboot
-    iptables-save > /etc/iptables/rules.v4
-    ip6tables-save > /etc/iptables/rules.v6
-    
+    iptables -A INPUT -p tcp --dport "$new_port" -j ACCEPT
+    ip6tables -A INPUT -p tcp --dport "$new_port" -j ACCEPT
+
+    # Persist and configure auto-restore when helper is available.
+    if declare -F _persist_rules >/dev/null 2>&1; then
+        _persist_rules
+    else
+        mkdir -p /etc/iptables
+        iptables-save > /etc/iptables/rules.v4
+        ip6tables-save > /etc/iptables/rules.v6
+    fi
+
     echo "iptables rules updated to allow SSH on port $new_port."
 }
-
 # Function to create a symbolic link to panda.sh
 install_panda() {
     script_path=$(readlink -f "$0")
@@ -150,24 +191,38 @@ output_status() {
             if (tx_total > 1024) { tx_total /= 1024; tx_units = "MB"; }
             if (tx_total > 1024) { tx_total /= 1024; tx_units = "GB"; }
 
-            printf("总接收: %.2f %s\n总发送: %.2f %s\n", rx_total, rx_units, tx_total, tx_units);
+            printf("æ€»æŽ¥æ”¶: %.2f %s\næ€»å‘é€: %.2f %s\n", rx_total, rx_units, tx_total, tx_units);
         }' /proc/net/dev)
 }
 
 ip_address() {
-ipv4_address=$(curl -s ipv4.ip.sb)
-ipv6_address=$(curl -s --max-time 1 ipv6.ip.sb)
-}
+    # Query IPv4 and IPv6 in parallel to keep UI responsive.
+    local tmp_ipv4 tmp_ipv6
+    tmp_ipv4=$(mktemp) || return 1
+    tmp_ipv6=$(mktemp) || { rm -f "$tmp_ipv4"; return 1; }
 
+    curl -s --connect-timeout 1 --max-time 2 -4 ipv4.ip.sb > "$tmp_ipv4" &
+    local pid4=$!
+    curl -s --connect-timeout 1 --max-time 2 -6 ipv6.ip.sb > "$tmp_ipv6" &
+    local pid6=$!
+
+    wait "$pid4" 2>/dev/null
+    wait "$pid6" 2>/dev/null
+
+    ipv4_address=$(tr -d '\r\n' < "$tmp_ipv4")
+    ipv6_address=$(tr -d '\r\n' < "$tmp_ipv6")
+
+    rm -f "$tmp_ipv4" "$tmp_ipv6"
+}
 current_timezone() {
-    if grep -q 'Alpine' /etc/issue; then
-       date +"%Z %z"
+    if [ -f /etc/alpine-release ]; then
+        date +"%Z %z"
+    elif has_command timedatectl; then
+        timedatectl show -p Timezone --value 2>/dev/null || date +"%Z %z"
     else
-       timedatectl | grep "Time zone" | awk '{print $3}'
+        date +"%Z %z"
     fi
-
 }
-
 # Function Script
 
 # Function to retrieve and display system information
@@ -177,7 +232,7 @@ system_info_query() {
     ip_address
 
     if [ "$(uname -m)" == "x86_64" ]; then
-      cpu_info=$(cat /proc/cpuinfo | grep 'model name' | uniq | sed -e 's/model name[[:space:]]*: //')
+      cpu_info=$(awk -F': ' '/model name/{print $2; exit}' /proc/cpuinfo)
     else
       cpu_info=$(lscpu | grep 'BIOS Model name' | awk -F': ' '{print $2}' | sed 's/^[ \t]*//')
     fi
@@ -199,10 +254,11 @@ system_info_query() {
 
     disk_info=$(df -h | awk '$NF=="/"{printf "%s/%s (%s)", $3, $2, $5}')
 
-    country=$(curl -s ipinfo.io/country)
-    city=$(curl -s ipinfo.io/city)
-
-    isp_info=$(curl -s ipinfo.io/org)
+    # Fetch location/ISP data in one call to reduce network latency.
+    ipinfo_json=$(curl -s --connect-timeout 1 --max-time 3 ipinfo.io/json | tr -d '\n')
+    country=$(printf "%s" "$ipinfo_json" | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    city=$(printf "%s" "$ipinfo_json" | sed -n 's/.*"city"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    isp_info=$(printf "%s" "$ipinfo_json" | sed -n 's/.*"org"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 
     cpu_arch=$(uname -m)
 
@@ -351,110 +407,88 @@ system_clean() {
 }
 
 # Sub menu for System Tools
-system_tools() {
-while true; do
-    # Automatically detect SSH port from /etc/ssh/sshd_config
-    current_ssh_port=$(grep -P '^\s*Port\s+\d+' /etc/ssh/sshd_config | awk '{print $2}')
-    if [ -z "$current_ssh_port" ]; then
-        current_ssh_port=22 # Default SSH port
-    fi
+swap_management_menu() {
+    while true; do
+        local swap_info swap_choice swap_size
+        swap_info=$(get_swap_info)
 
-    clear
-    echo "▶ System Tools"
-    echo "------------------------"
-    echo "Current SSH Port: $current_ssh_port"
-    echo "------------------------"
-    echo "1. Set DNS Address"
-    echo "2. Set SSH Port"
-    echo "3. Manage SSH Key Authentication"
-    echo "------------------------"
-    echo "4. Install Fail2ban"
-    echo "5. Fail2ban Status"
-    echo "------------------------"
-    echo "5. Swap Memory Management"
-    echo "7. Reboot Server"
-    echo "------------------------"
-    echo "0. Return to Main Menu"
-    echo "------------------------"
-    read -p "Enter your choice: " sub_choice
+        clear
+        echo "Current Swap Memory: $swap_info"
+        echo
+        echo "Swap Memory Management"
+        echo "$MENU_DIVIDER"
+        echo "1. Add 1024MB Swap"
+        echo "2. Add 2048MB Swap"
+        echo "3. Manually Add Swap Memory"
+        echo "4. Disable Swap"
+        echo "$MENU_DIVIDER"
+        echo "0. Return to System Tools"
+        echo "$MENU_DIVIDER"
+        read -r -p "Enter your choice: " swap_choice
 
-    case $sub_choice in
-        1)
-            set_dns
-            ;;
-        2)
-            echo "Enter the new SSH port: "
-            read new_port
-            set_ssh_port $new_port
-            ;;
-        3)
-            manage_ssh_key_auth
-            ;;
-        4)
-            install_fail2ban
-            ;;
-        5)
-            fail2ban_status
-            ;;
-        5)
-            while true; do
-                swap_used=$(free -m | awk 'NR==3{print $3}')
-                swap_total=$(free -m | awk 'NR==3{print $2}')
+        case "$swap_choice" in
+            1) add_swap 1024 ;;
+            2) add_swap 2048 ;;
+            3)
+                read -r -p "Enter the swap size in MB: " swap_size
+                add_swap "$swap_size"
+                ;;
+            4) disable_swap ;;
+            0) return ;;
+            *) echo "Invalid choice!" ;;
+        esac
 
-                if [ "$swap_total" -eq 0 ]; then
-                swap_percentage=0
-                else
-                swap_percentage=$((swap_used * 100 / swap_total))
-                fi
-
-                swap_info="${swap_used}MB/${swap_total}MB (${swap_percentage}%)"
-                clear
-                echo "Current Swap Memory: $swap_info"
-                echo ""
-                echo "Swap Memory Management"
-                echo "------------------------"
-                echo "1. Add 1024MB Swap"
-                echo "2. Add 2048MB Swap"
-                echo "3. Manually Add Swap Memory"
-                echo "4. Disable Swap"
-                echo "------------------------"
-                echo "0. Return to System Tools"
-                echo "------------------------"
-                read -p "Enter your choice: " swap_choice
-
-                case $swap_choice in
-                    1) add_swap 1024 ;;
-                    2) add_swap 2048 ;;
-                    3) 
-                        echo "Enter the swap size in MB: "
-                        read swap_size
-                        add_swap $swap_size
-                        ;;
-                    4) disable_swap ;;
-                    0) break ;;
-                    *) echo "Invalid choice!" ;;
-                esac
-            done
-            ;;
-        6)
-            reboot_server
-            ;;
-        0)
-            break  # Exit the loop, return to the main menu
-            ;;
-        *)
-            echo "Invalid input!"
-            ;;
-    esac
-    break_end
-done
+        pause_screen
+    done
 }
 
+system_tools() {
+    while true; do
+        local current_ssh_port sub_choice new_port
+        current_ssh_port=$(get_current_ssh_port)
+
+        clear
+        echo "System Tools"
+        echo "$MENU_DIVIDER"
+        echo "Current SSH Port: $current_ssh_port"
+        echo "$MENU_DIVIDER"
+        echo "1. Set DNS Address"
+        echo "2. Set SSH Port"
+        echo "3. Manage SSH Key Authentication"
+        echo "$MENU_DIVIDER"
+        echo "4. Install Fail2ban"
+        echo "5. Fail2ban Status"
+        echo "$MENU_DIVIDER"
+        echo "6. Swap Memory Management"
+        echo "7. Reboot Server"
+        echo "$MENU_DIVIDER"
+        echo "0. Return to Main Menu"
+        echo "$MENU_DIVIDER"
+        read -r -p "Enter your choice: " sub_choice
+
+        case "$sub_choice" in
+            1) set_dns ;;
+            2)
+                read -r -p "Enter the new SSH port: " new_port
+                set_ssh_port "$new_port"
+                ;;
+            3) manage_ssh_key_auth ;;
+            4) install_fail2ban ;;
+            5) fail2ban_status ;;
+            6) swap_management_menu ;;
+            7) reboot_server ;;
+            0) break ;;
+            *) show_invalid_input ;;
+        esac
+
+        break_end
+    done
+}
 # Sub menu for Media Unblock Check
 media_unblock_check() {
     while true; do
         clear
-        echo "▶ Media Unblock Check"
+        echo "â–¶ Media Unblock Check"
         echo "------------------------"
         echo "1. DNS Unblock Testing (IPv4)"
         echo "2. DNS Unblock Testing (IPv6)"
@@ -473,7 +507,7 @@ media_unblock_check() {
             0) break ;;
             *) echo "Invalid input!" ;;
         esac
-        read -p "Press any key to continue..." key
+        pause_screen
     done
 }
 
@@ -481,12 +515,12 @@ media_unblock_check() {
 trace_route_menu() {
     while true; do
         clear
-        echo "▶ Trace Route"
+        echo "â–¶ Trace Route"
         echo "------------------------"
         echo "1. Install"
         echo "2. Trace Lsize"
         echo "3. Trace Ssize"
- echo "4. Trace Manual"
+        echo "4. Trace Manual"
 
         echo "------------------------"
         echo "0. Return to Main Menu"
@@ -502,17 +536,17 @@ trace_route_menu() {
                 clear
                 read -p "Enter the IP address to trace: " ip_address
                 nexttrace -T --psize 1450 $ip_address -p 80
-                read -p "Press any key to continue..." key
+                pause_screen
                 ;;
             3)
                 clear
                 read -p "Enter the IP address to trace: " ip_address
                 nexttrace -T --psize 64 $ip_address -p 80
-                read -p "Press any key to continue..." key
+                pause_screen
                 ;;
             4)
                 trace_manual
-                read -p "Press any key to continue..." key
+                pause_screen
                 ;;
 
             0)
@@ -527,22 +561,17 @@ trace_route_menu() {
 # Function for manual trace route
 trace_manual() {
     clear
-    read -p "Enter the IP address to trace: " -r ip_address
-
-    read -p "Enter optional packet size (--psize, default 1450): " -r psize
-
-    local command="nexttrace -T $ip_address -p 80"
+    read -r -p "Enter the IP address to trace: " ip_address
+    read -r -p "Enter optional packet size (--psize, default 1450): " psize
 
     if [ -n "$psize" ]; then
-        command="nexttrace -T --psize $psize $ip_address -p 80"
+        echo "Running command: nexttrace -T --psize $psize $ip_address -p 80"
+        nexttrace -T --psize "$psize" "$ip_address" -p 80
     else
-        command="nexttrace -T --psize 1450 $ip_address -p 80"
+        echo "Running command: nexttrace -T --psize 1450 $ip_address -p 80"
+        nexttrace -T --psize 1450 "$ip_address" -p 80
     fi
-
-    echo "Running command: $command"
-    eval "$command"
 }
-
 # Function to test DNS response time and update resolv.conf with the best DNS group
 set_dns() {
     #-----------------------------
@@ -702,7 +731,7 @@ set_dns() {
         elif [ "$cb" -lt "$ca" ]; then
             win="$B"; wscore="$cb"
         else
-            # Tie on combined — break by lower dig, then lower ping
+            # Tie on combined â€” break by lower dig, then lower ping
             if [ "$da" -lt "$db" ]; then
                 win="$A"; wscore="$ca"
             elif [ "$db" -lt "$da" ]; then
@@ -811,35 +840,48 @@ set_dns() {
 
 
 set_ssh_port() {
-    new_port=$1
+    local new_port="$1"
 
-    # Backup the SSH configuration file
-    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+    if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; then
+        echo "Invalid SSH port: $new_port"
+        return 1
+    fi
 
-    # Ensure the Port line is uncommented and updated
-    sed -i 's/^\s*#\?\s*Port/Port/' /etc/ssh/sshd_config
+    local sshd_conf="/etc/ssh/sshd_config"
+    local backup_file="/etc/ssh/sshd_config.bak.$(date +%Y%m%d%H%M%S)"
 
-    # Replace the port number in the SSH configuration file
-    sed -i "s/Port [0-9]\+/Port $new_port/g" /etc/ssh/sshd_config
+    if [ ! -f "$sshd_conf" ]; then
+        echo "SSH config not found: $sshd_conf"
+        return 1
+    fi
 
-    # Restart the SSH service
-    restart_ssh
-    echo "SSH port has been changed to: $new_port"
+    cp "$sshd_conf" "$backup_file"
 
-    clear
-    iptables_open
- if [ -f "/etc/debian_version" ]; then
- # Debian-based systems
- apt remove --purge -y iptables-persistent ufw > /dev/null 2>&1
- elif [ -f "/etc/redhat-release" ]; then
- # Red Hat-based systems
- yum remove -y firewalld iptables-services > /dev/null 2>&1
- elif [ -f "/etc/alpine-release" ]; then
- # Alpine Linux
- apk del --purge iptables-services > /dev/null 2>&1
- fi
+    if grep -qE '^[[:space:]]*#?[[:space:]]*Port[[:space:]]+' "$sshd_conf"; then
+        sed -i -E "s/^[[:space:]]*#?[[:space:]]*Port[[:space:]]+.*/Port $new_port/" "$sshd_conf"
+    else
+        printf '\nPort %s\n' "$new_port" >> "$sshd_conf"
+    fi
+
+    if restart_ssh; then
+        echo "SSH port has been changed to: $new_port"
+    else
+        echo "Failed to restart SSH service, restoring backup."
+        cp "$backup_file" "$sshd_conf"
+        restart_ssh
+        return 1
+    fi
+
+    iptables_open "$new_port"
+
+    if [ -f "/etc/debian_version" ]; then
+        apt remove --purge -y iptables-persistent ufw >/dev/null 2>&1
+    elif [ -f "/etc/redhat-release" ]; then
+        yum remove -y firewalld iptables-services >/dev/null 2>&1
+    elif [ -f "/etc/alpine-release" ]; then
+        apk del --purge iptables-services >/dev/null 2>&1
+    fi
 }
-
 manage_ssh_key_auth() {
     # Generate an SSH key pair
     ssh-keygen -t ed25519 -C "xxxx@gmail.com" -f /root/.ssh/sshkey -N ""
@@ -864,7 +906,12 @@ manage_ssh_key_auth() {
 }
 
 add_swap() {
-    swap_size=$1
+    local swap_size="$1"
+
+    if ! [[ "$swap_size" =~ ^[0-9]+$ ]] || [ "$swap_size" -le 0 ]; then
+        echo "Invalid swap size: $swap_size"
+        return 1
+    fi
 
     # Turn off any existing swap
     swapoff -a
@@ -872,8 +919,12 @@ add_swap() {
     # Remove any existing swapfile
     rm -f /swapfile
 
-    # Create a new swapfile of the specified size
-    dd if=/dev/zero of=/swapfile bs=1M count=$swap_size
+    # Create a new swapfile of the specified size.
+    if has_command fallocate; then
+        fallocate -l "${swap_size}M" /swapfile || dd if=/dev/zero of=/swapfile bs=1M count="$swap_size"
+    else
+        dd if=/dev/zero of=/swapfile bs=1M count="$swap_size"
+    fi
     chmod 600 /swapfile
     mkswap /swapfile
     swapon /swapfile
@@ -917,8 +968,6 @@ reboot_server() {
 
 # Function to install Fail2Ban
 install_fail2ban() {
-  set -e
-
   echo "Detecting SSH port(s)..."
 
   detect_ssh_ports() {
@@ -1069,8 +1118,6 @@ EOF
 
 
 fail2ban_status() {
-  set -u
-
   echo "=== Fail2Ban Status Report ==="
 
   # ---------- helpers ----------
@@ -1197,7 +1244,7 @@ fail2ban_status() {
   # mismatch warning (simple string compare; normalize spaces)
   if [ -n "$ssh_ports" ] && [ -n "$fb_ports" ]; then
     if [ "$(echo "$ssh_ports" | tr -d ' ')" != "$(echo "$fb_ports" | tr -d ' ')" ]; then
-      echo "⚠️  WARNING: SSH is on $ssh_ports but Fail2Ban is monitoring $fb_ports"
+      echo "âš ï¸  WARNING: SSH is on $ssh_ports but Fail2Ban is monitoring $fb_ports"
     fi
   fi
 
@@ -1256,7 +1303,7 @@ fail2ban_status() {
 docker_management() {
     while true; do
         clear
-        echo "▶ Docker Management"
+        echo "â–¶ Docker Management"
         echo "------------------------"
         echo "1. Install/Update Docker Environment"
         echo "2. View Docker Global Status"
@@ -1291,7 +1338,7 @@ docker_management() {
                 echo "Docker Network List"
                 docker network ls
                 echo ""
-                read -p "Press any key to continue..." key
+                pause_screen
                 ;;
             3)
                 clear
@@ -1313,8 +1360,14 @@ docker_management() {
                 read -p "$(echo -e "Are you sure you want to uninstall the Docker environment? (Y/N): ")" choice
                 case "$choice" in
                     [Yy])
-                        docker rm $(docker ps -a -q)
-                        docker rmi $(docker images -q)
+                        containers=$(docker ps -aq)
+                        images=$(docker images -q)
+                        if [ -n "$containers" ]; then
+                            docker rm $containers
+                        fi
+                        if [ -n "$images" ]; then
+                            docker rmi $images
+                        fi
                         docker network prune
                         remove_docker
                         echo "Docker environment uninstalled."
@@ -1339,29 +1392,27 @@ docker_management() {
 install_docker() {
     clear
     echo "Installing Docker..."
-    DIR="/root/containers/"
-    if [ ! -d "$DIR" ]; then
-        mkdir -p "$DIR"
-        echo "Directory $DIR created."
-    else
-        cd "$DIR"
-        echo "Changed directory to $DIR."
-    fi
+
+    local DIR="/root/containers/"
+    mkdir -p "$DIR"
+    cd "$DIR" || return 1
+    echo "Changed directory to $DIR."
 
     # Install Docker using the convenience script
     curl -fsSL https://get.docker.com | sh
-    
+
     # Start and enable the Docker service
-    systemctl start docker
-    systemctl enable docker
-    
+    if has_command systemctl; then
+        systemctl start docker
+        systemctl enable docker
+    fi
+
     # Download and install Docker Compose
     curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
     chmod +x /usr/local/bin/docker-compose
 
     echo "Docker installation completed."
 }
-
 remove_docker() {
     echo "Uninstalling Docker..."
     # Stop Docker services
@@ -1388,7 +1439,7 @@ remove_docker() {
 warp_management() {
     while true; do
         clear
-        echo "▶ WARP Management"
+        echo "â–¶ WARP Management"
         echo "------------------------"
         echo "1. Install WARP Client"
         echo "2. Check WARP Status"
@@ -1685,7 +1736,7 @@ bbr_management() {
     rm -f tcpx.sh
 
     echo "BBR Management completed. Returning to Main Menu."
-    read -p "Press any key to continue..." key
+    pause_screen
 }
 
 # Function for Realm Management
@@ -1705,7 +1756,7 @@ realm_management() {
     ./realm.sh
 
     echo "Realm Management completed. Returning to Main Menu."
-    read -p "Press any key to continue..." key
+    pause_screen
 }
 
 # IPTables Management Submenu
@@ -1713,7 +1764,7 @@ realm_management() {
 _require_root() {
     if [[ $EUID -ne 0 ]]; then
         echo "Please run this script as root (or with sudo)."
-        read -p "Press any key to continue..." _
+        pause_screen
         return 1
     fi
     return 0
@@ -1726,42 +1777,149 @@ _list_nat() {
     }
 }
 
-_add_udp_redirect() {
-    # $1 = iptables|ip6tables
-    local cmd="$1"
-    echo "Add UDP Port Redirect ($cmd)"
+_persist_rules() {
+    local save_dir="/etc/iptables"
+    local v4_file="$save_dir/rules.v4"
+    local v6_file="$save_dir/rules.v6"
+    local saved_any=0
+
+    mkdir -p "$save_dir"
+
+    if command -v iptables-save >/dev/null 2>&1; then
+        if iptables-save > "$v4_file"; then
+            echo "Saved v4 to $v4_file"
+            saved_any=1
+        else
+            echo "Failed to save IPv4 rules."
+        fi
+    fi
+
+    if command -v ip6tables-save >/dev/null 2>&1; then
+        if ip6tables-save > "$v6_file"; then
+            echo "Saved v6 to $v6_file"
+            saved_any=1
+        else
+            echo "Failed to save IPv6 rules."
+        fi
+    fi
+
+    if [[ "$saved_any" -eq 0 ]]; then
+        echo "No rules were saved. Ensure iptables/ip6tables tools are installed."
+        return 1
+    fi
+
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+        netfilter-persistent save >/dev/null 2>&1 || true
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable netfilter-persistent >/dev/null 2>&1 || true
+        fi
+        echo "Auto-restore configured via netfilter-persistent."
+        return 0
+    fi
+
+    if command -v systemctl >/dev/null 2>&1 && pidof systemd >/dev/null 2>&1; then
+        cat >/etc/systemd/system/panda-iptables-restore.service <<'EOF'
+[Unit]
+Description=Restore iptables/ip6tables rules saved by PandaSH
+DefaultDependencies=no
+After=network-pre.target
+Before=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '[ -f /etc/iptables/rules.v4 ] && iptables-restore < /etc/iptables/rules.v4 || true; [ -f /etc/iptables/rules.v6 ] && ip6tables-restore < /etc/iptables/rules.v6 || true'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable panda-iptables-restore.service >/dev/null 2>&1 || true
+        echo "Auto-restore configured via systemd service: panda-iptables-restore.service"
+        return 0
+    fi
+
+    if command -v rc-update >/dev/null 2>&1; then
+        mkdir -p /etc/local.d
+        cat >/etc/local.d/panda-iptables-restore.start <<'EOF'
+#!/bin/sh
+[ -f /etc/iptables/rules.v4 ] && iptables-restore < /etc/iptables/rules.v4
+[ -f /etc/iptables/rules.v6 ] && ip6tables-restore < /etc/iptables/rules.v6
+exit 0
+EOF
+        chmod +x /etc/local.d/panda-iptables-restore.start
+        rc-update add local default >/dev/null 2>&1 || true
+        echo "Auto-restore configured via OpenRC local service."
+        return 0
+    fi
+
+    echo "Rules saved, but auto-restore service could not be configured automatically."
+    echo "Restore manually on boot with:"
+    echo "  iptables-restore < /etc/iptables/rules.v4"
+    echo "  ip6tables-restore < /etc/iptables/rules.v6"
+    return 0
+}
+
+_add_udp_redirect_both() {
+    echo "Add UDP Port Redirect (v4 + v6)"
 
     echo "Available network interfaces:"
-    ip -o link show | awk -F': ' '{print " - " $2}'   # list interfaces
+    ip -o link show | awk -F': ' '{print " - " $2}'
 
     read -p "Interface: " IFACE
     read -p "Destination UDP port or range to catch (23001 or 23001:23900): " DPORT
     read -p "Local port to redirect to (23001): " TOPORT
 
     if [[ -z "$IFACE" || -z "$DPORT" || -z "$TOPORT" ]]; then
-        echo "Missing values."; return
+        echo "Missing values."
+        return
     fi
 
-    if $cmd -t nat -A PREROUTING -i "$IFACE" -p udp --dport "$DPORT" -j REDIRECT --to-ports "$TOPORT" 2>/dev/null; then
-        echo "Rule added:"
-        echo "$cmd -t nat -A PREROUTING -i $IFACE -p udp --dport $DPORT -j REDIRECT --to-ports $TOPORT"
-    else
-        echo "Failed to add rule."
+    local cmd failed=0 changed_any=0
+    for cmd in iptables ip6tables; do
+        if $cmd -t nat -C PREROUTING -i "$IFACE" -p udp --dport "$DPORT" -j REDIRECT --to-ports "$TOPORT" 2>/dev/null; then
+            echo "$cmd: rule already exists."
+            continue
+        fi
+        if $cmd -t nat -A PREROUTING -i "$IFACE" -p udp --dport "$DPORT" -j REDIRECT --to-ports "$TOPORT" 2>/dev/null; then
+            echo "$cmd: rule added."
+            changed_any=1
+        else
+            echo "$cmd: failed to add rule."
+            failed=1
+        fi
+    done
+
+    if [[ "$changed_any" -eq 1 ]]; then
+        _persist_rules
+    elif [[ "$failed" -eq 0 ]]; then
+        echo "No changes needed."
     fi
 }
 
+_delete_udp_redirect_by_line_both() {
+    echo "Current NAT PREROUTING rules (v4):"
+    iptables -t nat -L PREROUTING -n -v --line-numbers 2>/dev/null || echo "No PREROUTING chain for v4."
+    echo
+    echo "Current NAT PREROUTING rules (v6):"
+    ip6tables -t nat -L PREROUTING -n -v --line-numbers 2>/dev/null || echo "No PREROUTING chain for v6."
+    echo
 
-_delete_nat_rule_by_number() {
-    # $1 = iptables|ip6tables
-    local cmd="$1"
-    echo "Current NAT rules ($cmd):"
-    $cmd -t nat -L PREROUTING -n -v --line-numbers 2>/dev/null || { echo "No PREROUTING chain."; return; }
-    read -p "Enter line number to DELETE from PREROUTING (blank to cancel): " LINENO
+    read -p "Enter line number to DELETE from PREROUTING in BOTH v4 and v6 (blank to cancel): " LINENO
     [[ -z "$LINENO" ]] && { echo "Cancelled."; return; }
-    if $cmd -t nat -D PREROUTING "$LINENO" 2>/dev/null; then
-        echo "Deleted rule #$LINENO from PREROUTING."
-    else
-        echo "Failed to delete rule #$LINENO."
+
+    local cmd deleted_any=0
+    for cmd in iptables ip6tables; do
+        if $cmd -t nat -D PREROUTING "$LINENO" 2>/dev/null; then
+            echo "$cmd: deleted rule #$LINENO."
+            deleted_any=1
+        else
+            echo "$cmd: failed to delete rule #$LINENO."
+        fi
+    done
+
+    if [[ "$deleted_any" -eq 1 ]]; then
+        _persist_rules
     fi
 }
 
@@ -1778,45 +1936,20 @@ _block_ip() {
     fi
     if $cmd -A INPUT -s "$IP" -j DROP 2>/dev/null; then
         echo "Blocked $IP on INPUT."
+        _persist_rules
     else
         echo "Failed to add block rule."
-    fi
-}
-
-_persist_rules() {
-    # Try netfilter-persistent first; else fall back to saving files
-    if command -v netfilter-persistent >/dev/null 2>&1; then
-        netfilter-persistent save && echo "Saved via netfilter-persistent." && return
-    fi
-    if command -v service >/dev/null 2>&1 && service netfilter-persistent status >/dev/null 2>&1; then
-        netfilter-persistent save && echo "Saved via netfilter-persistent." && return
-    fi
-    # Fallback: write to rules files if the dirs exist
-    local did=0
-    if [[ -d /etc/iptables ]]; then
-        iptables-save > /etc/iptables/rules.v4 && echo "Saved v4 to /etc/iptables/rules.v4" && did=1
-        ip6tables-save > /etc/iptables/rules.v6 && echo "Saved v6 to /etc/iptables/rules.v6" && did=1
-    elif [[ -d /etc ]]; then
-        # create directory if reasonable
-        mkdir -p /etc/iptables
-        iptables-save > /etc/iptables/rules.v4 && echo "Saved v4 to /etc/iptables/rules.v4" && did=1
-        ip6tables-save > /etc/iptables/rules.v6 && echo "Saved v6 to /etc/iptables/rules.v6" && did=1
-    fi
-    if [[ $did -eq 0 ]]; then
-        echo "Could not persist automatically. Consider installing iptables-persistent:"
-        echo "  apt install -y iptables-persistent   # Debian/Ubuntu"
-        echo "Then run: netfilter-persistent save"
     fi
 }
 
 # --- helper to render current NAT rules before the menu and after actions ---
 _render_nat_snapshot() {
     clear
-    echo "▶ Current IPTables NAT Rules (v4)"
+    echo "Current IPTables NAT Rules (v4)"
     echo "---------------------------------"
     _require_root && _list_nat iptables
     echo
-    echo "▶ Current IPTables NAT Rules (v6)"
+    echo "Current IPTables NAT Rules (v6)"
     echo "---------------------------------"
     _require_root && _list_nat ip6tables
     echo
@@ -1827,17 +1960,15 @@ iptables_management() {
         # always show latest NAT rules before showing the menu
         _render_nat_snapshot
 
-        echo "▶ IPTables Management"
+        echo "IPTables Management"
         echo "------------------------"
         echo "1. List IPTables NAT rules v4"
         echo "2. List IPTables NAT rules v6"
-        echo "3. Add UDP Port redirect v4"
-        echo "4. Add UDP Port redirect v6"
-        echo "5. Delete UDP Port redirect v4 (by line number)"
-        echo "6. Delete UDP Port redirect v6 (by line number)"
-        echo "7. Block specific IP address v4"
-        echo "8. Block specific IP address v6"
-        echo "9. Persist current rules"
+        echo "3. Add UDP Port redirect (v4 + v6)"
+        echo "4. Delete UDP Port redirect (v4 + v6, by line number)"
+        echo "5. Block specific IP address v4"
+        echo "6. Block specific IP address v6"
+        echo "7. Persist current rules + enable auto-restore on reboot"
         echo "------------------------"
         echo "0. Return to Main Menu"
         echo "------------------------"
@@ -1847,19 +1978,17 @@ iptables_management() {
             0) break ;;
             1) _require_root && _list_nat iptables ;;
             2) _require_root && _list_nat ip6tables ;;
-            3) _require_root && _add_udp_redirect iptables ;;
-            4) _require_root && _add_udp_redirect ip6tables ;;
-            5) _require_root && _delete_nat_rule_by_number iptables ;;
-            6) _require_root && _delete_nat_rule_by_number ip6tables ;;
-            7) _require_root && _block_ip iptables v4 ;;
-            8) _require_root && _block_ip ip6tables v6 ;;
-            9) _require_root && _persist_rules ;;
+            3) _require_root && _add_udp_redirect_both ;;
+            4) _require_root && _delete_udp_redirect_by_line_both ;;
+            5) _require_root && _block_ip iptables v4 ;;
+            6) _require_root && _block_ip ip6tables v6 ;;
+            7) _require_root && _persist_rules ;;
             *) echo "Invalid input!" ;;
         esac
 
         # after any action (add/delete/block/etc), re-render the rules so you see changes immediately
         _render_nat_snapshot
-        read -p "Press any key to continue..." _
+        pause_screen
     done
 }
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Global configuration
-SCRIPT_VERSION="0.4.2"
+SCRIPT_VERSION="0.4.3"
 MENU_DIVIDER="------------------------"
 
 # Legacy color variables used by existing messages
@@ -1772,9 +1772,71 @@ _require_root() {
 
 _list_nat() {
     local cmd="$1"  # iptables or ip6tables
-    $cmd -t nat -L -n -v --line-numbers 2>/dev/null || {
-        echo "No NAT table or no rules for $cmd."
-    }
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "$cmd is not installed."
+        return 1
+    fi
+
+    if ! $cmd -t nat -S PREROUTING >/dev/null 2>&1; then
+        echo "NAT PREROUTING is not available for $cmd."
+        return 1
+    fi
+
+    if $cmd -t nat -S PREROUTING 2>/dev/null | grep -qE '^-A PREROUTING '; then
+        $cmd -t nat -L PREROUTING -n -v --line-numbers
+    else
+        echo "No NAT PREROUTING rules."
+    fi
+}
+
+_has_nat_prerouting_rules() {
+    local cmd="$1"
+    command -v "$cmd" >/dev/null 2>&1 || return 1
+    $cmd -t nat -S PREROUTING 2>/dev/null | grep -qE '^-A PREROUTING '
+}
+
+_get_persist_status() {
+    local backend="none"
+    local restore_enabled=0
+    local v4_file="/etc/iptables/rules.v4"
+    local v6_file="/etc/iptables/rules.v6"
+    local unsaved=0
+
+    if command -v systemctl >/dev/null 2>&1 && pidof systemd >/dev/null 2>&1; then
+        if systemctl is-enabled --quiet netfilter-persistent 2>/dev/null; then
+            backend="netfilter-persistent"
+            restore_enabled=1
+        elif systemctl is-enabled --quiet panda-iptables-restore.service 2>/dev/null; then
+            backend="panda-iptables-restore.service"
+            restore_enabled=1
+        fi
+    fi
+
+    if [[ "$restore_enabled" -eq 0 ]] && command -v rc-update >/dev/null 2>&1; then
+        if [[ -x /etc/local.d/panda-iptables-restore.start ]] && rc-update show default 2>/dev/null | grep -qw local; then
+            backend="openrc-local"
+            restore_enabled=1
+        fi
+    fi
+
+    if [[ "$restore_enabled" -eq 1 ]]; then
+        if command -v iptables-save >/dev/null 2>&1 && [[ -s "$v4_file" ]]; then
+            cmp -s <(iptables-save) "$v4_file" || unsaved=1
+        fi
+        if command -v ip6tables-save >/dev/null 2>&1 && [[ -s "$v6_file" ]]; then
+            cmp -s <(ip6tables-save) "$v6_file" || unsaved=1
+        fi
+    fi
+
+    if [[ "$restore_enabled" -eq 0 ]]; then
+        echo "Persistence: NOT CONFIGURED (rules may reset after reboot)"
+    elif [[ ! -s "$v4_file" && ! -s "$v6_file" ]]; then
+        echo "Persistence: CONFIGURED but no saved rules files (rules may reset)"
+    elif [[ "$unsaved" -eq 1 ]]; then
+        echo "Persistence: PARTIAL (auto-restore configured via $backend, but current rules are not fully saved)"
+    else
+        echo "Persistence: OK (auto-restore via $backend; rules should survive reboot)"
+    fi
 }
 
 _persist_rules() {
@@ -1899,11 +1961,16 @@ _add_udp_redirect_both() {
 
 _delete_udp_redirect_by_line_both() {
     echo "Current NAT PREROUTING rules (v4):"
-    iptables -t nat -L PREROUTING -n -v --line-numbers 2>/dev/null || echo "No PREROUTING chain for v4."
+    _list_nat iptables
     echo
     echo "Current NAT PREROUTING rules (v6):"
-    ip6tables -t nat -L PREROUTING -n -v --line-numbers 2>/dev/null || echo "No PREROUTING chain for v6."
+    _list_nat ip6tables
     echo
+
+    if ! _has_nat_prerouting_rules iptables && ! _has_nat_prerouting_rules ip6tables; then
+        echo "No UDP redirect rules found to delete."
+        return
+    fi
 
     read -p "Enter line number to DELETE from PREROUTING in BOTH v4 and v6 (blank to cancel): " LINENO
     [[ -z "$LINENO" ]] && { echo "Cancelled."; return; }
@@ -1945,6 +2012,8 @@ _block_ip() {
 # --- helper to render current NAT rules before the menu and after actions ---
 _render_nat_snapshot() {
     clear
+    echo "$(_get_persist_status)"
+    echo
     echo "Current IPTables NAT Rules (v4)"
     echo "---------------------------------"
     _require_root && _list_nat iptables

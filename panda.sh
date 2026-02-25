@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Global configuration
-SCRIPT_VERSION="0.6"
+SCRIPT_VERSION="0.7"
 MENU_DIVIDER="------------------------"
 
 # Legacy color variables used by existing messages
@@ -374,8 +374,8 @@ fix_debian_apt_sources() {
         sed -Ei \
             -e 's|https?://security\.debian\.org/debian-security|http://deb.debian.org/debian-security|g' \
             -e 's|https?://security\.debian\.org|http://deb.debian.org/debian-security|g' \
-            -e 's|([[:space:]])bullseye/updates([[:space:]]|$)|\1bullseye-security\2|g' \
-            -e 's|([[:space:]])bookworm/updates([[:space:]]|$)|\1bookworm-security\2|g' \
+            -e 's#([[:space:]])bullseye/updates([[:space:]]|$)#\1bullseye-security\2#g' \
+            -e 's#([[:space:]])bookworm/updates([[:space:]]|$)#\1bookworm-security\2#g' \
             "$list_file"
 
         if [ "$codename" = "bullseye" ]; then

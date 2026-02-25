@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Global configuration
-SCRIPT_VERSION="0.5"
+SCRIPT_VERSION="0.6"
 MENU_DIVIDER="------------------------"
 
 # Legacy color variables used by existing messages
@@ -342,10 +342,59 @@ system_info_query() {
 }
 
 # Function to update the system
+fix_debian_apt_sources() {
+    local codename list_file needs_fix changed_files
+    codename=""
+    changed_files=0
+
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        codename="${VERSION_CODENAME:-}"
+    fi
+
+    if [ -z "$codename" ] && has_command lsb_release; then
+        codename="$(lsb_release -cs 2>/dev/null)"
+    fi
+
+    for list_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+        [ -f "$list_file" ] || continue
+        needs_fix=0
+
+        if grep -Eq 'bullseye/updates|bookworm/updates|security\.debian\.org|bullseye-backports' "$list_file"; then
+            needs_fix=1
+        fi
+
+        if [ "$needs_fix" -eq 0 ]; then
+            continue
+        fi
+
+        cp -a "$list_file" "${list_file}.panda.bak" 2>/dev/null || true
+
+        sed -Ei \
+            -e 's|https?://security\.debian\.org/debian-security|http://deb.debian.org/debian-security|g' \
+            -e 's|https?://security\.debian\.org|http://deb.debian.org/debian-security|g' \
+            -e 's|([[:space:]])bullseye/updates([[:space:]]|$)|\1bullseye-security\2|g' \
+            -e 's|([[:space:]])bookworm/updates([[:space:]]|$)|\1bookworm-security\2|g' \
+            "$list_file"
+
+        if [ "$codename" = "bullseye" ]; then
+            sed -Ei '/^[[:space:]]*deb(-src)?[[:space:]].*[[:space:]]bullseye-backports([[:space:]]|$)/ s|^|# panda.sh disabled obsolete bullseye-backports: |' "$list_file"
+        fi
+
+        changed_files=$((changed_files + 1))
+    done
+
+    if [ "$changed_files" -gt 0 ]; then
+        echo "Auto-fixed Debian APT source entries for $codename ($changed_files file(s) adjusted)."
+    fi
+}
+
 system_update() {
 
     # Update system on Debian-based systems
     if [ -f "/etc/debian_version" ]; then
+        fix_debian_apt_sources
         apt update -y && apt upgrade -y && apt full-upgrade -y && apt autoremove -y && apt autoclean -y
     fi
 

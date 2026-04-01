@@ -22,6 +22,80 @@ has_command() {
     command -v "$1" >/dev/null 2>&1
 }
 
+is_first_time_vps_setup() {
+    local marker_file file
+    local conf_files=("/etc/sysctl.conf")
+    marker_file="/etc/panda/.first_setup_bbr_done"
+
+    [ -f "$marker_file" ] && return 1
+
+    for file in /etc/sysctl.d/*.conf; do
+        [ -f "$file" ] && conf_files+=("$file")
+    done
+
+    # If congestion tuning already exists, treat VPS as already initialized.
+    if grep -Eq '^[[:space:]]*net\.ipv4\.tcp_congestion_control[[:space:]]*=|^[[:space:]]*net\.core\.default_qdisc[[:space:]]*=' \
+        "${conf_files[@]}" 2>/dev/null; then
+        return 1
+    fi
+
+    return 0
+}
+
+apply_first_setup_bbr_profile() {
+    local marker_dir marker_file profile_file
+    marker_dir="/etc/panda"
+    marker_file="${marker_dir}/.first_setup_bbr_done"
+    profile_file="/etc/sysctl.d/99-panda-bbr.conf"
+
+    if [[ $EUID -ne 0 ]]; then
+        return 1
+    fi
+
+    if ! is_first_time_vps_setup; then
+        return 1
+    fi
+
+    mkdir -p "$marker_dir"
+
+    cat > "$profile_file" << 'EOF'
+fs.file-max = 6815744
+net.ipv4.tcp_no_metrics_save=1
+net.ipv4.tcp_ecn=0
+net.ipv4.tcp_frto=0
+net.ipv4.tcp_mtu_probing=0
+net.ipv4.tcp_rfc1337=0
+net.ipv4.tcp_sack=1
+net.ipv4.tcp_fack=1
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_adv_win_scale=1
+net.ipv4.tcp_moderate_rcvbuf=1
+net.core.rmem_max=33554432
+net.core.wmem_max=33554432
+net.ipv4.tcp_rmem=4096 87380 33554432
+net.ipv4.tcp_wmem=4096 16384 33554432
+net.ipv4.udp_rmem_min=8192
+net.ipv4.udp_wmem_min=8192
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.route_localnet=1
+net.ipv4.conf.all.forwarding=1
+net.ipv4.conf.default.forwarding=1
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv6.conf.all.forwarding=1
+net.ipv6.conf.default.forwarding=1
+EOF
+
+    sysctl -p >/dev/null 2>&1 || true
+    if sysctl --system >/dev/null 2>&1; then
+        touch "$marker_file"
+        echo "First-time VPS setup detected. Applied Panda BBR sysctl profile."
+        return 0
+    fi
+
+    return 1
+}
+
 get_current_ssh_port() {
     local port
     port=$(awk '$1 ~ /^Port$/ && $2 ~ /^[0-9]+$/ { print $2; exit }' /etc/ssh/sshd_config 2>/dev/null)
@@ -175,6 +249,8 @@ uninstall_panda() {
 if [[ "$0" == "./panda.sh" ]]; then
     install_panda
 fi
+
+apply_first_setup_bbr_profile || true
 
 # Non Manual Function
 output_status() {
@@ -1996,15 +2072,16 @@ EOF
     return 0
 }
 
-_add_udp_redirect_both() {
-    echo "Add UDP Port Redirect (v4 + v6)"
+_add_proto_redirect_both() {
+    local proto="$1"
+    echo "Add ${proto^^} Port Redirect (v4 + v6)"
 
     echo "Available network interfaces:"
     ip -o link show | awk -F': ' '{print " - " $2}'
 
     read -p "Interface: " IFACE
-    read -p "Destination UDP port or range to catch (23001 or 23001:23900): " DPORT
-    read -p "Local port to redirect to (23001): " TOPORT
+    read -p "Destination ${proto^^} port or range to catch (e.g. 23001 or 23001:23900): " DPORT
+    read -p "Local port to redirect to (e.g. 23001): " TOPORT
 
     if [[ -z "$IFACE" || -z "$DPORT" || -z "$TOPORT" ]]; then
         echo "Missing values."
@@ -2013,11 +2090,11 @@ _add_udp_redirect_both() {
 
     local cmd failed=0 changed_any=0
     for cmd in iptables ip6tables; do
-        if $cmd -t nat -C PREROUTING -i "$IFACE" -p udp --dport "$DPORT" -j REDIRECT --to-ports "$TOPORT" 2>/dev/null; then
+        if $cmd -t nat -C PREROUTING -i "$IFACE" -p "$proto" --dport "$DPORT" -j REDIRECT --to-ports "$TOPORT" 2>/dev/null; then
             echo "$cmd: rule already exists."
             continue
         fi
-        if $cmd -t nat -A PREROUTING -i "$IFACE" -p udp --dport "$DPORT" -j REDIRECT --to-ports "$TOPORT" 2>/dev/null; then
+        if $cmd -t nat -A PREROUTING -i "$IFACE" -p "$proto" --dport "$DPORT" -j REDIRECT --to-ports "$TOPORT" 2>/dev/null; then
             echo "$cmd: rule added."
             changed_any=1
         else
@@ -2033,7 +2110,10 @@ _add_udp_redirect_both() {
     fi
 }
 
-_delete_udp_redirect_by_line_both() {
+_add_tcp_redirect_both() { _add_proto_redirect_both tcp; }
+_add_udp_redirect_both() { _add_proto_redirect_both udp; }
+
+_delete_nat_prerouting_by_line_both() {
     echo "Current NAT PREROUTING rules (v4):"
     _list_nat iptables
     echo
@@ -2042,7 +2122,7 @@ _delete_udp_redirect_by_line_both() {
     echo
 
     if ! _has_nat_prerouting_rules iptables && ! _has_nat_prerouting_rules ip6tables; then
-        echo "No UDP redirect rules found to delete."
+        echo "No NAT PREROUTING rules found to delete."
         return
     fi
 
@@ -2104,28 +2184,33 @@ iptables_management() {
         _render_nat_snapshot
 
         echo "IPTables Management"
-        echo "------------------------"
-        echo "1. List IPTables NAT rules v4"
-        echo "2. List IPTables NAT rules v6"
-        echo "3. Add UDP Port redirect (v4 + v6)"
-        echo "4. Delete UDP Port redirect (v4 + v6, by line number)"
-        echo "5. Block specific IP address v4"
-        echo "6. Block specific IP address v6"
-        echo "7. Persist current rules + enable auto-restore on reboot"
-        echo "------------------------"
+        echo "$MENU_DIVIDER"
+        echo "1. List NAT rules v4"
+        echo "2. List NAT rules v6"
+        echo "$MENU_DIVIDER"
+        echo "3. Add TCP Port redirect (v4 + v6)"
+        echo "4. Add UDP Port redirect (v4 + v6)"
+        echo "5. Delete NAT PREROUTING rule (v4 + v6, by line number)"
+        echo "$MENU_DIVIDER"
+        echo "6. Block IP address v4"
+        echo "7. Block IP address v6"
+        echo "$MENU_DIVIDER"
+        echo "8. Persist rules + enable auto-restore on reboot"
+        echo "$MENU_DIVIDER"
         echo "0. Return to Main Menu"
-        echo "------------------------"
+        echo "$MENU_DIVIDER"
         read -p "Enter your choice: " sub_choice
 
         case "$sub_choice" in
             0) break ;;
             1) _require_root && _list_nat iptables ;;
             2) _require_root && _list_nat ip6tables ;;
-            3) _require_root && _add_udp_redirect_both ;;
-            4) _require_root && _delete_udp_redirect_by_line_both ;;
-            5) _require_root && _block_ip iptables v4 ;;
-            6) _require_root && _block_ip ip6tables v6 ;;
-            7) _require_root && _persist_rules ;;
+            3) _require_root && _add_tcp_redirect_both ;;
+            4) _require_root && _add_udp_redirect_both ;;
+            5) _require_root && _delete_nat_prerouting_by_line_both ;;
+            6) _require_root && _block_ip iptables v4 ;;
+            7) _require_root && _block_ip ip6tables v6 ;;
+            8) _require_root && _persist_rules ;;
             *) echo "Invalid input!" ;;
         esac
 

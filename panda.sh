@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Global configuration
-SCRIPT_VERSION="0.7"
+SCRIPT_VERSION="0.8"
 MENU_DIVIDER="------------------------"
 
 # Legacy color variables used by existing messages
